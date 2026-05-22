@@ -1,0 +1,23 @@
+services:
+  stalearr:
+    build: .
+    container_name: stalearr
+    restart: unless-stopped
+    environment:
+      TZ: America/Toronto
+      CRON_SCHEDULE: "0 4 * * *"
+      RUN_ON_START: "true"
+      DRY_RUN: "false"
+      LOG_LEVEL: INFO
+
+      RADARR_URL: http://radarr:7878
+      RADARR_API_KEY: ${RADARR_API_KEY}
+      RADARR_DAYS: "30"
+      RADARR_RELEASE_TYPE: digitalRelease
+      RADARR_REQUIRE_CUTOFF_MET: "true"
+
+      SONARR_URL: http://sonarr:8989
+      SONARR_API_KEY: ${SONARR_API_KEY}
+      SONARR_DAYS: "30"
+      SONARR_RELEASE_TYPE: airDateUtc
+      SONARR_REQUIRE_CUTOFF_MET: "true"
