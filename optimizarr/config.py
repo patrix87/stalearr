@@ -197,9 +197,7 @@ def _parse_topsis(raw: dict) -> TopsisConfig:
         cfg.size_envelope_by_profile = {
             name: {
                 res: _envelope_pair(v, f"size_envelope_by_profile.{name}.{res}")
-                for res, v in _int_keyed(
-                    inner, f"size_envelope_by_profile.{name}"
-                ).items()
+                for res, v in _int_keyed(inner, f"size_envelope_by_profile.{name}").items()
             }
             for name, inner in raw["size_envelope_by_profile"].items()
         }

@@ -30,16 +30,28 @@ def _file(score=200_000, resolution="1920x1080", size_gb=30.0):
 
 
 def test_decide_hold_when_no_candidates():
-    d = decide(_topsis(), [], runtime_h=2.0, profile_name=None, target_resolution=None,
-               current_file=_file())
+    d = decide(
+        _topsis(),
+        [],
+        runtime_h=2.0,
+        profile_name=None,
+        target_resolution=None,
+        current_file=_file(),
+    )
     assert d.action == "HOLD"
 
 
 def test_decide_act_on_clear_upgrade():
     # Current is a bloated 1080p low-score file; candidate is a clean 2160p high-score.
     releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
-    d = decide(_topsis(), releases, runtime_h=2.0, profile_name="2160p Quality",
-               target_resolution=2160, current_file=_file(score=200_000, resolution="1920x1080"))
+    d = decide(
+        _topsis(),
+        releases,
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=_file(score=200_000, resolution="1920x1080"),
+    )
     assert d.action == "ACT"
     assert d.release["guid"] == "g1"
 
@@ -48,8 +60,14 @@ def test_decide_hold_when_current_already_good():
     # Current file is already excellent and small; nothing better.
     releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
     current = _file(score=1_000_000, resolution="3840x2160", size_gb=14.0)
-    d = decide(_topsis(), releases, runtime_h=2.0, profile_name="2160p Quality",
-               target_resolution=2160, current_file=current)
+    d = decide(
+        _topsis(),
+        releases,
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=current,
+    )
     assert d.action == "HOLD"
 
 

@@ -192,9 +192,7 @@ class SonarrOptimizer(ArrOptimizer):
         items: list[dict] = []
         for series in series_list:
             episodes = (
-                self.client.get(
-                    f"/api/v3/episode?seriesId={series['id']}&includeEpisodeFile=true"
-                )
+                self.client.get(f"/api/v3/episode?seriesId={series['id']}&includeEpisodeFile=true")
                 or []
             )
             items.extend(ep for ep in episodes if ep.get("hasFile"))
