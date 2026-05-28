@@ -1,20 +1,17 @@
 from datetime import UTC, datetime
 
-from stalearr.config import AppConfig
-from stalearr.radarr import _is_candidate
+from optimizarr.config import UnmonitorAppConfig
+from optimizarr.radarr import _is_candidate
 
 
-def _config(**overrides) -> AppConfig:
+def _config(**overrides) -> UnmonitorAppConfig:
     base = {
-        "name": "radarr",
-        "url": "http://radarr",
-        "api_key": "k",
         "days": 30,
         "release_type": "digitalRelease",
         "require_cutoff_met": True,
     }
     base.update(overrides)
-    return AppConfig(**base)
+    return UnmonitorAppConfig(**base)
 
 
 NOW = datetime(2026, 5, 22, tzinfo=UTC)

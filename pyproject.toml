@@ -1,6 +1,6 @@
 [project]
-name = "stalearr"
-description = "Unmonitor Radarr movies and Sonarr episodes a configurable number of days after release."
+name = "optimizarr"
+description = "TOPSIS-based release optimizer for Radarr/Sonarr, plus a configurable unmonitor job."
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
@@ -10,7 +10,7 @@ dependencies = [
 dynamic = ["version"]
 
 [tool.hatch.version]
-path = "stalearr/__init__.py"
+path = "optimizarr/__init__.py"
 
 [build-system]
 requires = ["hatchling"]

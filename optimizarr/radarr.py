@@ -1,11 +1,11 @@
 import logging
 from datetime import UTC, datetime
 
-from stalearr.config import AppConfig
-from stalearr.dates import age_days
-from stalearr.http import ArrClient
+from optimizarr.config import Connection, UnmonitorAppConfig
+from optimizarr.dates import age_days
+from optimizarr.http import ArrClient
 
-logger = logging.getLogger("stalearr")
+logger = logging.getLogger("optimizarr")
 
 
 def _reference_date(movie: dict, release_type: str) -> str | None:
@@ -17,7 +17,7 @@ def _reference_date(movie: dict, release_type: str) -> str | None:
     return movie.get(release_type)
 
 
-def _is_candidate(movie: dict, config: AppConfig, now: datetime) -> tuple[bool, str]:
+def _is_candidate(movie: dict, config: UnmonitorAppConfig, now: datetime) -> tuple[bool, str]:
     if not movie.get("monitored", False):
         return False, "not monitored"
 
@@ -40,9 +40,9 @@ def _is_candidate(movie: dict, config: AppConfig, now: datetime) -> tuple[bool, 
     return True, f"{age:.1f}d since {config.release_type}"
 
 
-def run(config: AppConfig, dry_run: bool) -> None:
-    client = ArrClient(config.url, config.api_key)
-    logger.info("[radarr] fetching movies from %s", config.url)
+def run(conn: Connection, config: UnmonitorAppConfig, dry_run: bool) -> None:
+    client = ArrClient(conn.url, conn.api_key)
+    logger.info("[radarr] fetching movies from %s", conn.url)
     movies = client.get("/api/v3/movie")
     logger.info("[radarr] %d total movies", len(movies))
 

@@ -19,7 +19,7 @@ WORKDIR /app
 
 COPY --from=uv-builder /usr/local/bin/uv* /usr/local/bin/
 
-RUN mkdir stalearr && echo '__version__ = "0.0.0"' > stalearr/__init__.py && touch README.md
+RUN mkdir optimizarr && echo '__version__ = "0.0.0"' > optimizarr/__init__.py && touch README.md
 
 COPY pyproject.toml uv.lock ./
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-install-project --no-dev
@@ -29,10 +29,10 @@ RUN --mount=type=cache,target=/root/.cache/uv uv sync --locked --no-dev --no-edi
 
 FROM python:3.13-slim AS runner
 
-LABEL org.opencontainers.image.title="stalearr"
-LABEL org.opencontainers.image.description="Unmonitor Radarr movies and Sonarr episodes a configurable number of days after release."
-LABEL org.opencontainers.image.source="https://github.com/patrix87/stalearr"
-LABEL org.opencontainers.image.url="https://github.com/patrix87/stalearr"
+LABEL org.opencontainers.image.title="optimizarr"
+LABEL org.opencontainers.image.description="TOPSIS-based release optimizer for Radarr/Sonarr, plus a configurable unmonitor job."
+LABEL org.opencontainers.image.source="https://github.com/patrix87/optimizarr"
+LABEL org.opencontainers.image.url="https://github.com/patrix87/optimizarr"
 LABEL org.opencontainers.image.licenses="MIT"
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -40,4 +40,4 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 COPY --from=builder /app/.venv /app/.venv
 
-CMD ["python", "-m", "stalearr"]
+CMD ["python", "-m", "optimizarr"]

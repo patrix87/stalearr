@@ -1,6 +1,6 @@
 from datetime import UTC, datetime
 
-from stalearr.dates import age_days, parse_iso
+from optimizarr.dates import age_days, parse_iso
 
 
 def test_parse_iso_handles_z_suffix():

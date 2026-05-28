@@ -3,8 +3,8 @@ from urllib.error import HTTPError, URLError
 
 import pytest
 
-from stalearr import http
-from stalearr.http import ArrClient
+from optimizarr import http
+from optimizarr.http import ArrClient
 
 
 class _FakeResponse:

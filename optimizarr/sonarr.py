@@ -1,11 +1,11 @@
 import logging
 from datetime import UTC, datetime
 
-from stalearr.config import AppConfig
-from stalearr.dates import age_days
-from stalearr.http import ArrClient
+from optimizarr.config import Connection, UnmonitorAppConfig
+from optimizarr.dates import age_days
+from optimizarr.http import ArrClient
 
-logger = logging.getLogger("stalearr")
+logger = logging.getLogger("optimizarr")
 
 
 def _reference_date(episode: dict, release_type: str) -> str | None:
@@ -17,7 +17,7 @@ def _reference_date(episode: dict, release_type: str) -> str | None:
     return episode.get(release_type)
 
 
-def _is_candidate(episode: dict, config: AppConfig, now: datetime) -> tuple[bool, str]:
+def _is_candidate(episode: dict, config: UnmonitorAppConfig, now: datetime) -> tuple[bool, str]:
     if not episode.get("monitored", False):
         return False, "not monitored"
 
@@ -49,9 +49,9 @@ def _label(series_by_id: dict[int, dict], episode: dict) -> str:
     return f"{title} S{season:02d}E{number:02d}"
 
 
-def run(config: AppConfig, dry_run: bool) -> None:
-    client = ArrClient(config.url, config.api_key)
-    logger.info("[sonarr] fetching series from %s", config.url)
+def run(conn: Connection, config: UnmonitorAppConfig, dry_run: bool) -> None:
+    client = ArrClient(conn.url, conn.api_key)
+    logger.info("[sonarr] fetching series from %s", conn.url)
     series_list = client.get("/api/v3/series")
     series_by_id = {s["id"]: s for s in series_list}
     logger.info("[sonarr] %d series", len(series_list))

@@ -1,0 +1,92 @@
+# optimizarr configuration.
+# Copy to config.toml and mount at /config/config.toml (or set CONFIG_PATH).
+# Secrets, URLs, and paths live in the environment (.env), NOT here.
+
+# Log only, never grab or unmonitor. Applies to both features.
+dry_run = false
+
+# ===== Unmonitor: cron-scheduled, unmonitor items N days after release =====
+[unmonitor]
+enabled = true
+cron_schedule = "0 4 * * *"
+run_on_start = true
+
+[unmonitor.radarr]
+days = 30
+# One of: digitalRelease, physicalRelease, inCinemas, releaseDate, dateAdded
+release_type = "digitalRelease"
+require_cutoff_met = true
+
+[unmonitor.sonarr]
+days = 30
+# One of: airDateUtc, dateAdded
+release_type = "airDateUtc"
+require_cutoff_met = true
+
+# ===== Optimizer: interval-driven worker that re-picks better releases =====
+[optimizer]
+enabled = false
+apps = ["radarr", "sonarr"]
+# Only process when the download queue has <= queue_max items (0 = empty only).
+queue_max = 0
+# "random" or "ordered"
+pick_order = "random"
+# Settle delay after a grab so it surfaces in the queue before the next read.
+process_interval_seconds = 10
+# How long to wait before re-reading the queue when it's over queue_max.
+queue_recheck_seconds = 60
+# How often to re-fetch the full library list from Radarr/Sonarr.
+list_refresh_minutes = 60
+# A satisfied item is re-evaluated this many days later.
+reevaluate_after_days = 30
+
+[optimizer.topsis]
+score_ideal = 1000000
+resolution_ideal = 2160
+score_anti_ideal = 0
+resolution_anti_ideal = 480
+# Adaptive score floor: prefer >= preferred; never go more than drop_from_top below the pool top.
+score_floor_preferred = 900000
+score_drop_from_top = 250000
+# Path A (shrink): closeness gain AND size savings both required.
+min_closeness_gain = 0.05
+min_size_savings_gb = 0.5
+# Path B (upgrade): large closeness gain, size increase tolerated.
+allow_upgrades = true
+min_closeness_gain_for_upgrade = 0.10
+
+# Default TOPSIS weights (must sum to 1.0).
+[optimizer.topsis.weights]
+score = 0.40
+resolution = 0.25
+size = 0.35
+
+# Per-profile weight overrides (each must sum to 1.0). Quality biases toward score.
+[optimizer.topsis.weights_by_profile."2160p Quality"]
+score = 0.60
+resolution = 0.15
+size = 0.25
+
+# GB/h sanity floor per resolution — drops obvious fake/low-bitrate encodes.
+[optimizer.topsis.sanity_gbh_floor_by_resolution]
+"480" = 0.2
+"720" = 0.4
+"1080" = 0.8
+"2160" = 1.5
+
+# Per-resolution size envelope [target, bloat] in GB/h, used for off-profile candidates.
+[optimizer.topsis.size_envelope_by_resolution]
+"480" = [0.5, 5.0]
+"720" = [1.5, 8.0]
+"1080" = [3.0, 12.0]
+"2160" = [6.0, 25.0]
+
+# Per-profile size envelopes [target, bloat] keyed by the profile's target resolution.
+[optimizer.topsis.size_envelope_by_profile."1080p Efficient"]
+"1080" = [3.0, 12.0]
+
+[optimizer.topsis.size_envelope_by_profile."2160p Efficient"]
+"2160" = [6.0, 25.0]
+
+[optimizer.topsis.size_envelope_by_profile."2160p Quality"]
+"2160" = [12.0, 40.0]

@@ -6,7 +6,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-logger = logging.getLogger("stalearr")
+logger = logging.getLogger("optimizarr")
 
 TIMEOUT_SEC = 30
 
@@ -76,3 +76,6 @@ class ArrClient:
 
     def put(self, path: str, body: dict) -> Any:
         return self._request("PUT", path, body)
+
+    def post(self, path: str, body: dict) -> Any:
+        return self._request("POST", path, body)
