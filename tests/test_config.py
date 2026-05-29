@@ -109,6 +109,14 @@ def test_rejects_invalid_pick_order(monkeypatch, tmp_path):
         load_config(path)
 
 
+def test_rejects_process_interval_below_floor(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, "[optimizer]\nprocess_interval_seconds = 5\n")
+    with pytest.raises(ValueError, match="process_interval_seconds must be >= 10"):
+        load_config(path)
+
+
 def test_rejects_weights_not_summing_to_one(monkeypatch, tmp_path):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")

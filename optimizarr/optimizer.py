@@ -1,12 +1,20 @@
 """Optimizer worker: walk the library, re-pick better releases, grab them.
 
-"Optimized" means the algorithm can no longer find anything better than the current
-file (HOLD) — never merely "we triggered a grab". Built around the fact that grabs
-frequently fail: in-flight is detected from the download queue, and a failed grab
-(blocklisted by Radarr/Sonarr) is simply walked past on the next pass.
+"Optimized" means the algorithm can no longer find anything better than the current file
+(HOLD) — never merely "we triggered a grab". The worker is deliberately simple:
 
-App-specific HTTP lives in the RadarrOptimizer / SonarrOptimizer adapters; the worker
-loop and the per-item decision are app-agnostic.
+  - refresh the item list on a slow interval (list_refresh_minutes);
+  - on each tick, if the download queue is at/under queue_max, pick a not-yet-satisfied
+    item that isn't already in the queue, evaluate it, and either grab a better release
+    or mark it satisfied (HOLD);
+  - a grab is never recorded. Success shows up as a HOLD on the next evaluation (→
+    satisfied); failure leaves the item unsatisfied so it's retried later, with the failed
+    release now blocklisted by Radarr/Sonarr's Failed Download Handling.
+
+Downloads in progress are read live from the queue (gate + per-item skip), so there's no
+in-flight bookkeeping and a restart needs no reconciliation. App-specific HTTP lives in the
+RadarrOptimizer / SonarrOptimizer adapters; the worker loop and per-item decision are
+app-agnostic.
 """
 
 import logging
@@ -386,35 +394,31 @@ class OptimizerWorker:
         adapter.refresh_profiles()
         items = adapter.list_items(now)
         ctx.items_by_id = {adapter.item_id(it): it for it in items}
-        ctx.evaluated.clear()
+        # NB: ctx.evaluated is intentionally NOT cleared here. A refresh only updates the
+        # candidate set (new items become pickable, removed ones drop); the current pass
+        # keeps its progress so a slow walk over a large library isn't restarted every
+        # list_refresh_minutes. The pass resets in _build_pool once it's fully covered.
         ctx.last_refresh = now
         logger.info("[%s] list refreshed: %d items with files", adapter.app, len(items))
 
-    def _reconcile_in_flight(self, ctx: _AppContext, queue_ids: set[int]) -> None:
-        """A grabbed item that left the queue either succeeded (file id changed ->
-        satisfied) or failed (file unchanged -> unprocessed, to retry next pass)."""
-        adapter = ctx.adapter
-        for item_id in self.state.in_flight_ids(adapter.app):
-            if item_id in queue_ids:
-                continue  # still downloading
-            entry = self.state.get(adapter.app, item_id)
-            item = ctx.items_by_id.get(item_id)
-            current_fid = adapter.current_file_id(item) if item else None
-            if entry and current_fid != entry.file_id_at_grab:
-                logger.info("[%s] grab succeeded for id=%d -> satisfied", adapter.app, item_id)
-                self.state.mark_satisfied(adapter.app, item_id, current_fid)
-            else:
-                logger.info("[%s] grab failed for id=%d -> retry later", adapter.app, item_id)
-                self.state.clear(adapter.app, item_id)
-
     def _build_pool(self, ctx: _AppContext, now: datetime) -> None:
         days = self.opt.reevaluate_after_days
-        ctx.pool = [
-            item_id
-            for item_id in ctx.items_by_id
-            if item_id not in ctx.evaluated
-            and self.state.is_active(ctx.adapter.app, item_id, now, days)
-        ]
+        app = ctx.adapter.app
+
+        def active(exclude_evaluated: bool) -> list[int]:
+            return [
+                item_id
+                for item_id in ctx.items_by_id
+                if self.state.is_active(app, item_id, now, days)
+                and not (exclude_evaluated and item_id in ctx.evaluated)
+            ]
+
+        ctx.pool = active(exclude_evaluated=True)
+        if not ctx.pool and ctx.evaluated:
+            # Every active item has been evaluated this pass — reset and start a new one.
+            ctx.evaluated.clear()
+            ctx.pool = active(exclude_evaluated=False)
+
         if self.opt.pick_order == "random":
             import random
 
@@ -433,18 +437,17 @@ class OptimizerWorker:
         logger.info("%s", format_decision(adapter.app, label, decision, self.dry_run))
 
         if decision.action == "HOLD":
+            # Nothing better (incl. no viable release): drop it from the pool.
             if not self.dry_run:
-                self.state.mark_satisfied(adapter.app, item_id, adapter.current_file_id(item))
+                self.state.mark_satisfied(adapter.app, item_id)
             return
 
-        if self.dry_run:
-            return
-
-        release = decision.release or {}
-        adapter.grab(release)
-        self.state.mark_in_flight(
-            adapter.app, item_id, release.get("guid", ""), adapter.current_file_id(item)
-        )
+        # ACT: grab, but do NOT record anything. If the download succeeds, the next
+        # evaluation HOLDs and marks it satisfied; if it fails, the item stays in the pool
+        # and is retried later (the failed release now blocklisted). Re-evaluation is the
+        # only success/failure signal we need.
+        if not self.dry_run:
+            adapter.grab(decision.release or {})
 
     def _sleep(self, seconds: float) -> None:
         self._stop.wait(seconds)
@@ -467,8 +470,8 @@ class OptimizerWorker:
                     self._sleep(self.opt.process_interval_seconds)
 
             if not progressed:
-                # Nothing actionable anywhere: wait for a queue slot or list refresh.
-                self._sleep(min(self.opt.queue_recheck_seconds, self.opt.list_refresh_minutes * 60))
+                # Nothing actionable (queue full or pool exhausted): wait one short tick.
+                self._sleep(self.opt.process_interval_seconds)
 
     def _process_app_once(self, ctx: _AppContext) -> bool:
         """Do at most one unit of work for an app. Returns True if an item was processed."""
@@ -479,9 +482,9 @@ class OptimizerWorker:
             self._refresh(ctx, now)
             ctx.pool = []  # force rebuild below
 
-        # Queue: one fetch serves the global gate and the per-item in-flight set.
+        # One queue fetch serves both the global gate and the "is this item currently
+        # downloading?" skip below — no in-flight state needed.
         queue_count, queue_ids = adapter.queue()
-        self._reconcile_in_flight(ctx, queue_ids)
 
         if not ctx.pool:
             self._build_pool(ctx, now)
@@ -496,7 +499,7 @@ class OptimizerWorker:
 
         item_id = ctx.pool.pop()
         if item_id in queue_ids:
-            return False  # already in flight; drop and move on
+            return False  # already downloading; skip and move on
 
         ctx.evaluated.add(item_id)  # don't re-pick within this refresh cycle
         try:

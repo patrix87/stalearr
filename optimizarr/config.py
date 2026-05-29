@@ -112,11 +112,10 @@ class OptimizerAppConfig:
 class OptimizerConfig:
     enabled: bool = False
     apps: list[str] = field(default_factory=lambda: ["radarr", "sonarr"])
-    queue_max: int = 0
+    queue_max: int = 5
     pick_order: str = "random"
-    process_interval_seconds: int = 10
-    queue_recheck_seconds: int = 60
-    list_refresh_minutes: int = 60
+    process_interval_seconds: int = 15
+    list_refresh_minutes: int = 15
     reevaluate_after_days: int = 30
     radarr: OptimizerAppConfig = field(
         default_factory=lambda: OptimizerAppConfig(release_type="digitalRelease")
@@ -283,14 +282,19 @@ def _parse_optimizer(raw: dict) -> OptimizerConfig:
     if pick_order not in PICK_ORDERS:
         raise ValueError(f"optimizer.pick_order={pick_order!r} not in {sorted(PICK_ORDERS)}")
 
+    process_interval_seconds = int(raw.get("process_interval_seconds", 15))
+    if process_interval_seconds < 10:
+        raise ValueError(
+            f"optimizer.process_interval_seconds must be >= 10, got {process_interval_seconds}"
+        )
+
     return OptimizerConfig(
         enabled=bool(raw.get("enabled", False)),
         apps=apps,
-        queue_max=int(raw.get("queue_max", 0)),
+        queue_max=int(raw.get("queue_max", 5)),
         pick_order=pick_order,
-        process_interval_seconds=int(raw.get("process_interval_seconds", 10)),
-        queue_recheck_seconds=int(raw.get("queue_recheck_seconds", 60)),
-        list_refresh_minutes=int(raw.get("list_refresh_minutes", 60)),
+        process_interval_seconds=process_interval_seconds,
+        list_refresh_minutes=int(raw.get("list_refresh_minutes", 15)),
         reevaluate_after_days=int(raw.get("reevaluate_after_days", 30)),
         radarr=_parse_optimizer_app(
             raw.get("radarr", {}), "digitalRelease", RADARR_RELEASE_TYPES, "optimizer.radarr"
@@ -369,10 +373,8 @@ def log_summary(config: Config) -> None:
     )
     if opt.enabled:
         logger.info(
-            "  optimizer: process_interval=%ds queue_recheck=%ds "
-            "list_refresh=%dm reevaluate_after=%dd",
+            "  optimizer: process_interval=%ds list_refresh=%dm reevaluate_after=%dd",
             opt.process_interval_seconds,
-            opt.queue_recheck_seconds,
             opt.list_refresh_minutes,
             opt.reevaluate_after_days,
         )

@@ -9,7 +9,7 @@ from optimizarr.optimizer import (
     decide,
     format_decision,
 )
-from optimizarr.state import IN_FLIGHT, SATISFIED, StateManager
+from optimizarr.state import SATISFIED, StateManager
 from optimizarr.topsis import GB, Topsis
 
 
@@ -148,62 +148,122 @@ def test_decide_hold_when_current_already_good():
     assert d.action == "HOLD"
 
 
-# ----- reconciliation -----
+# ----- _process_one: grab vs HOLD, and what gets persisted -----
 
 
-class _FakeAdapter(ArrOptimizer):
+class _ProcessAdapter(ArrOptimizer):
+    """Adapter double serving canned data to _process_one and recording grabs."""
+
     app = "radarr"
 
-    def __init__(self, file_ids):
-        self._file_ids = file_ids
+    def __init__(self, releases, current_file):
+        self._releases = releases
+        self._current = current_file
+        self.grabbed: list[dict] = []
+
+    def runtime_h(self, item):
+        return 2.0
+
+    def profile_for(self, item):
+        return ("2160p Quality", 2160)
+
+    def current_file(self, item):
+        return self._current
 
     def current_file_id(self, item):
-        return self._file_ids.get(item["id"])
+        return (self._current or {}).get("id")
 
-    def item_id(self, item):
-        return item["id"]
+    def releases(self, item):
+        return self._releases
+
+    def label(self, item):
+        return "Movie (2024)"
+
+    def grab(self, release):
+        self.grabbed.append(release)
 
 
-def _worker(state):
+def _worker(state, dry_run=False):
     w = OptimizerWorker.__new__(OptimizerWorker)
     w.opt = OptimizerConfig(enabled=True, apps=[])
     w.state = state
+    w.topsis = Topsis(TopsisConfig())
+    w.dry_run = dry_run
     return w
 
 
-def _ctx(file_ids):
-    ctx = _AppContext(_FakeAdapter(file_ids))
+def _ctx(adapter):
+    ctx = _AppContext(adapter)
     ctx.items_by_id = {1: {"id": 1}}
     return ctx
 
 
-def test_reconcile_grab_succeeded(tmp_path):
+def test_process_one_hold_marks_satisfied(tmp_path):
+    # Current file is already excellent; the candidate is no better -> HOLD -> satisfied.
     state = StateManager(str(tmp_path / "s.json"))
-    state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(state)
-
-    w._reconcile_in_flight(_ctx({1: 200}), queue_ids=set())  # file id changed -> success
+    adapter = _ProcessAdapter(
+        releases=[_release(score=1_000_000, resolution=2160, size_gb=14.0)],
+        current_file=_file(score=1_000_000, resolution="3840x2160", size_gb=14.0),
+    )
+    _worker(state)._process_one(_ctx(adapter), 1)
     entry = state.get("radarr", 1)
-    assert entry is not None
-    assert entry.status == SATISFIED
-    assert entry.file_id == 200
+    assert entry is not None and entry.status == SATISFIED
+    assert adapter.grabbed == []
 
 
-def test_reconcile_grab_failed(tmp_path):
+def test_process_one_act_grabs_without_marking(tmp_path):
+    # A clear upgrade is grabbed, but the item is NOT marked satisfied — it stays in the
+    # pool until a later evaluation HOLDs (success) or it's retried (failure).
     state = StateManager(str(tmp_path / "s.json"))
-    state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(state)
+    adapter = _ProcessAdapter(
+        releases=[_release(score=1_000_000, resolution=2160, size_gb=14.0)],
+        current_file=_file(score=200_000, resolution="1920x1080", size_gb=30.0),
+    )
+    _worker(state)._process_one(_ctx(adapter), 1)
+    assert len(adapter.grabbed) == 1
+    assert state.get("radarr", 1) is None
 
-    w._reconcile_in_flight(_ctx({1: 100}), queue_ids=set())  # file id unchanged -> failed
-    assert state.get("radarr", 1) is None  # cleared, will retry
 
-
-def test_reconcile_still_in_queue_untouched(tmp_path):
+def test_process_one_dry_run_does_not_grab(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
-    state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(state)
+    adapter = _ProcessAdapter(
+        releases=[_release(score=1_000_000, resolution=2160, size_gb=14.0)],
+        current_file=_file(score=200_000, resolution="1920x1080", size_gb=30.0),
+    )
+    _worker(state, dry_run=True)._process_one(_ctx(adapter), 1)
+    assert adapter.grabbed == []
+    assert state.get("radarr", 1) is None
 
-    w._reconcile_in_flight(_ctx({1: 100}), queue_ids={1})  # still downloading
-    entry = state.get("radarr", 1)
-    assert entry is not None
-    assert entry.status == IN_FLIGHT
+
+def test_build_pool_holds_progress_across_refresh_then_resets(tmp_path):
+    # A list refresh must NOT restart the pass: items already evaluated stay excluded
+    # until the whole active set is covered, then the pass resets.
+    state = StateManager(str(tmp_path / "s.json"))
+    w = _worker(state)
+    ctx = _AppContext(_ProcessAdapter([], None))
+    ctx.items_by_id = {1: {"id": 1}, 2: {"id": 2}, 3: {"id": 3}}
+    now = datetime.now(UTC)
+
+    w._build_pool(ctx, now)
+    assert set(ctx.pool) == {1, 2, 3}
+
+    # Two items processed this pass; a refresh happened (evaluated preserved).
+    ctx.evaluated = {1, 2}
+    w._build_pool(ctx, now)
+    assert ctx.pool == [3]  # only the unvisited item remains
+
+    # Last item visited -> pool empties -> pass resets to a fresh full sweep.
+    ctx.evaluated = {1, 2, 3}
+    w._build_pool(ctx, now)
+    assert set(ctx.pool) == {1, 2, 3}
+    assert ctx.evaluated == set()
+
+
+def test_build_pool_excludes_satisfied(tmp_path):
+    state = StateManager(str(tmp_path / "s.json"))
+    state.mark_satisfied("radarr", 2)
+    w = _worker(state)
+    ctx = _AppContext(_ProcessAdapter([], None))
+    ctx.items_by_id = {1: {"id": 1}, 2: {"id": 2}}
+    w._build_pool(ctx, datetime.now(UTC))
+    assert ctx.pool == [1]  # satisfied item 2 is out of the pool

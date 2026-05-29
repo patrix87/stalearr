@@ -71,72 +71,72 @@ feature keeps its own cron; the optimizer's cadence is governed by its own timer
 
 ```mermaid
 flowchart TD
-    Start(["Optimizer worker start"]) --> Refresh["Fetch item list from Radarr/Sonarr"]
-    Refresh --> Pool["Build active pool:<br/>cached − satisfied(in window) − in-flight"]
+    Start(["Optimizer worker start"]) --> Refresh["Fetch item list from Radarr/Sonarr<br/>(every list_refresh_minutes)"]
+    Refresh --> Pool["Build active pool:<br/>items with a file − satisfied(in window) − already evaluated this pass"]
     Pool --> Empty{"Active pool empty?"}
-    Empty -->|yes| Idle["Sleep until next list refresh<br/>(list_refresh_minutes)"]
+    Empty -->|yes| Idle["Idle sleep, then re-check / refresh"]
     Idle --> Refresh
-    Empty -->|no| Q["GET /api/v3/queue<br/>(one call: global gate + in-flight set)"]
+    Empty -->|no| Q["GET /api/v3/queue<br/>(one call: pace gate + 'already downloading' set)"]
     Q --> Gate{"queue count <= queue_max?"}
-    Gate -->|no| WaitQ["Sleep queue_recheck_seconds"]
+    Gate -->|no| WaitQ["Sleep process_interval_seconds"]
     WaitQ --> Q
     Gate -->|yes| Pick["Pick item — random or ordered"]
-    Pick --> InFlight{"Item id in queue?"}
-    InFlight -->|yes| Drop["In-flight — skip,<br/>remove from this session's pool"]
-    Drop --> Settle
-    InFlight -->|no| Eval["Evaluate releases<br/>(see pipeline above)"]
+    Pick --> Dl{"Item id already in queue?"}
+    Dl -->|yes| Skip["Skip — already downloading"]
+    Skip --> Settle
+    Dl -->|no| Eval["Evaluate releases<br/>(see pipeline above)"]
     Eval --> Decide{"ACT or HOLD?"}
-    Decide -->|HOLD| Sat["State: satisfied<br/>(record file id + timestamp)"]
-    Decide -->|ACT| Grab["POST grab · State: in_flight<br/>(record guid + timestamp)"]
-    Sat --> RemovePool["Remove item from active pool"]
-    Grab --> RemovePool
-    RemovePool --> Settle["Sleep process_interval_seconds<br/>settle: let the grab surface in the queue"]
+    Decide -->|HOLD| Sat["Mark satisfied<br/>(drops out of the pool)"]
+    Decide -->|ACT| Grab["POST grab — record nothing"]
+    Sat --> Settle["Sleep process_interval_seconds<br/>settle: let a grab surface in the queue"]
+    Grab --> Settle
     Settle --> Empty
 ```
 
 ### Loop notes
 
-- The **queue fetch sits at the top of each iteration**, *after* the settle sleep, so it
-  always reflects the previous iteration's grab. One fetch serves both the global gate
-  (`queue_max`) and the per-item in-flight check.
-- `process_interval_seconds` (default 10) is a **settle delay**, not just pacing: after a
-  `POST /api/v3/release`, Radarr needs a moment to hand the release to the download client
-  and register it in the queue. Reading the queue too soon would miss the just-grabbed item.
-- The active pool shrinks as items are processed and only grows on list refresh — this is
-  what stops the worker from re-querying every item forever. Random pick draws from the
-  active pool only, so optimized items are never re-picked.
+- One **queue fetch per iteration** serves both the pace gate (`queue_max`) and the
+  "is this item already downloading?" skip — so there is **no in-flight state** to track,
+  and a restart needs no reconciliation.
+- `process_interval_seconds` (default 10) is a **settle delay**: after a
+  `POST /api/v3/release`, Radarr needs a moment to register the release in the queue.
+  Reading too soon would make the next `queue_max` check miss the just-grabbed item.
+- A grab **records nothing**. Each picked item is remembered for the current **pass** so
+  it isn't re-picked; one pass covers every not-yet-satisfied item, however long that takes.
+  A **list refresh does not restart the pass** — it only updates the candidate set (new
+  items become pickable, removed ones drop). When the pass is fully covered it resets and a
+  new one begins. Satisfied items stay excluded until their reevaluate window elapses, so
+  over successive passes the active set keeps shrinking.
 
 ---
 
 ## 3. Per-item state lifecycle
 
-State lives in `/data/state.json`, keyed by movie id / episode id. The lifecycle is what
-makes failed downloads self-correcting — no cooldown timer required.
+State lives in `/data/state.json`, keyed by movie id / episode id. It records exactly one
+thing — whether an item is **satisfied** — and that minimalism is what makes failure
+handling self-correcting, with no in-flight tracking or cooldown timer.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unprocessed: not in state
 
+    Unprocessed --> Unprocessed: ACT — grab posted (state unchanged)
     Unprocessed --> Satisfied: HOLD — nothing better than current
-    Unprocessed --> InFlight: ACT — grab posted
-
-    InFlight --> InFlight: still in queue (downloading)
-    InFlight --> Satisfied: left queue, file id changed (grab succeeded)
-    InFlight --> Unprocessed: left queue, file unchanged (grab failed, blocklisted)
 
     Satisfied --> Unprocessed: reevaluate_after_days elapsed
 ```
 
 ### Why this self-corrects on failure
 
+- A grab is **never recorded**. The only persisted states are *unprocessed* and *satisfied*.
 - A grab that **succeeds** replaces the file; on the next evaluation the algorithm sees a
-  good current file and returns HOLD → the item becomes **satisfied**.
-- A grab that **fails** is blocklisted by Radarr's Failed Download Handling. On the next
-  evaluation, pre-filter 1 drops that blocklisted release, so TOPSIS picks the **next-best**
-  candidate. Repeated failures simply walk down the ranking, one blocklisted release at a
-  time, until one sticks (→ satisfied) or no viable candidate remains (HOLD → satisfied).
-- In-flight is detected purely from queue membership, so an item mid-download is never
-  re-grabbed.
+  good current file and returns HOLD → the item becomes **satisfied** and leaves the pool.
+- A grab that **fails** was never marked satisfied, so the item stays in the pool. When it's
+  picked again, pre-filter 1 drops the now-blocklisted release and TOPSIS picks the
+  **next-best** candidate. Repeated failures walk down the ranking, one blocklisted release
+  at a time, until one sticks (→ satisfied) or nothing viable remains (HOLD → satisfied).
+- A download **in progress** is skipped via live queue membership, never re-grabbed — so the
+  "did the grab work?" question is answered implicitly by re-evaluation, not by bookkeeping.
 
 > **Dependency:** this relies on Radarr/Sonarr **Failed Download Handling** being enabled
 > (default on) so dead releases get blocklisted. Without it, a failed grab would not be

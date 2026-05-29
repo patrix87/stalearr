@@ -28,15 +28,15 @@ require_cutoff_met = true
 enabled = true
 apps = ["radarr", "sonarr"]
 # Only process when the download queue has <= queue_max items (0 = empty only).
-queue_max = 0
+queue_max = 5
 # "random" or "ordered"
 pick_order = "random"
-# Settle delay after a grab so it surfaces in the queue before the next read.
-process_interval_seconds = 10
-# How long to wait before re-reading the queue when it's over queue_max.
-queue_recheck_seconds = 60
-# How often to re-fetch the full library list from Radarr/Sonarr.
-list_refresh_minutes = 60
+# Short loop: seconds between processing items — also the wait when the queue is full or
+# the list is exhausted, and the settle delay so a grab surfaces before the next read.
+# Minimum 10.
+process_interval_seconds = 15
+# Long loop: how often to re-fetch the full library list from Radarr/Sonarr.
+list_refresh_minutes = 15
 # A satisfied item (HOLD: nothing better found) is reconsidered this many days
 # later, in case better releases have since appeared. Set very high to effectively
 # never re-evaluate satisfied items.

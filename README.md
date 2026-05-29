@@ -31,20 +31,28 @@ saves you from tuning it yourself.
 
 ## How the optimizer works (short version)
 
-For each item with a file, on its own queue-gated interval:
+The worker refreshes the library list on a slow interval and, on each short tick, if the
+download queue is at or under `queue_max`, picks one not-yet-satisfied item that isn't
+already downloading and evaluates it:
 
 1. Fetch candidate releases (`GET /api/v3/release`).
 2. Pre-filter: drop hard rejections (blocklisted/unparseable/dead), then a per-resolution
    GB/h sanity floor, then an adaptive 4-tier score floor (negatives always dropped).
 3. Rank survivors with TOPSIS on three axes — score, resolution, size — using per-profile
    weights and size envelopes.
-4. Grab the top pick only if it clears a swap gate (real size savings at equal quality, or
-   a material quality upgrade); otherwise HOLD and mark the item satisfied.
+4. If the top pick clears a swap gate (real size savings at equal quality, or a material
+   quality upgrade) → **grab it**. Otherwise → **HOLD** and mark the item *satisfied* so it
+   drops out of the pool until `reevaluate_after_days` elapses.
 
-In-flight downloads are detected from the queue, not a timer. A failed grab is blocklisted
-by Radarr/Sonarr's Failed Download Handling and simply skipped on the next pass — so
-repeated failures walk down the ranking until one sticks. **Failed Download Handling must
-be enabled** (it is by default).
+A grab is never recorded as "done". Success simply shows up as a HOLD on the next
+evaluation (→ satisfied); a failed grab was never satisfied, so the item stays in the pool
+and is retried later — by then the dead release has been blocklisted by Radarr/Sonarr's
+Failed Download Handling, so the next-best release is picked. **Failed Download Handling
+must be enabled** (it is by default).
+
+The download queue does double duty: it's the global pace gate (`queue_max`) *and* the
+"skip anything already downloading" check — so there's no in-flight state to track and a
+restart needs no reconciliation.
 
 ## Configuration
 
@@ -67,43 +75,14 @@ If neither Radarr nor Sonarr is configured, the container exits 1.
 
 ### `config.toml`
 
-```toml
-dry_run = false   # log only, never grab or unmonitor
+All behavior lives in `config.toml`. The full set of keys — `dry_run`, the `[unmonitor]`
+schedule/per-app options, the `[optimizer]` worker settings, the per-app `min_age_days`
+release-age gate, and the `[optimizer.topsis]` tuning (weights, size envelopes, score
+floor, swap gates — all per-profile) — is documented inline in
+[`config.example.toml`](config.example.toml). Copy it to `config.toml` and edit.
 
-[unmonitor]
-enabled = true
-cron_schedule = "0 4 * * *"
-run_on_start = true
-[unmonitor.radarr]
-days = 30
-release_type = "digitalRelease"   # digitalRelease|physicalRelease|inCinemas|releaseDate|dateAdded
-require_cutoff_met = true
-[unmonitor.sonarr]
-days = 30
-release_type = "airDateUtc"       # airDateUtc|dateAdded
-require_cutoff_met = true
-
-[optimizer]
-enabled = true
-apps = ["radarr", "sonarr"]
-queue_max = 0                     # only act when the queue has <= this many items (0 = empty)
-pick_order = "random"             # random|ordered
-process_interval_seconds = 10     # settle delay after a grab so it surfaces in the queue
-queue_recheck_seconds = 60
-list_refresh_minutes = 60
-reevaluate_after_days = 30        # reconsider a "satisfied" item this many days later
-[optimizer.radarr]
-min_age_days = 30                  # only optimize items N days past release (0 = no gate)
-release_type = "digitalRelease"   # date field the age is measured from
-[optimizer.sonarr]
-min_age_days = 30
-release_type = "airDateUtc"
-```
-
-The `[optimizer.topsis]` block (weights, size envelopes, score floor, swap gates — all
-per-profile) is documented inline in [`config.example.toml`](config.example.toml). The
-defaults match the tuning validated during development; you should only need to touch them
-to add new profile names or adjust targets.
+The TOPSIS defaults match the tuning validated during development; you should only need to
+touch them to add new profile names or adjust targets.
 
 > The optimizer selects items by **`hasFile`**, regardless of monitored state — it improves
 > the existing library, and the unmonitor job deliberately strips monitoring once a file

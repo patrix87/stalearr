@@ -1,16 +1,18 @@
 """Per-item optimizer state, persisted to JSON.
 
-State is keyed by app ("radarr"/"sonarr") then item id (movie id / episode id).
-The lifecycle is what makes failed downloads self-correcting (no cooldown timer):
+Keyed by app ("radarr"/"sonarr") then item id (movie id / episode id). The only thing
+persisted is which items are *satisfied* — the algorithm found nothing better than the
+current file (HOLD). The lifecycle is deliberately minimal:
 
-  unprocessed  -> not in state
-  satisfied    -> HOLD: nothing better than the current file (record file_id + ts)
-  in_flight    -> ACT: a grab was posted (record guid + file_id_at_grab + ts)
+  unprocessed -> not in state: eligible to be picked and evaluated
+  satisfied   -> HOLD: nothing better right now; dropped from the pool until
+                 reevaluate_after_days elapses, then eligible again
 
-Reconciliation (worker, once a grabbed item leaves the queue):
-  in_flight -> satisfied   if the file id changed   (grab succeeded)
-  in_flight -> unprocessed if the file id is the same (grab failed; Radarr blocklists it)
-  satisfied -> unprocessed once reevaluate_after_days has elapsed
+A grab is never recorded. If it succeeds, the next evaluation HOLDs and marks the item
+satisfied; if it fails, the item was never satisfied so it stays in the pool and is
+retried later (the failed release having been blocklisted by Radarr/Sonarr). Downloads in
+progress are detected live from the queue, not from state, so a restart recovers with no
+reconciliation — nothing load-bearing lives only in memory.
 """
 
 import json
@@ -26,16 +28,12 @@ from optimizarr.dates import parse_iso
 logger = logging.getLogger("optimizarr")
 
 SATISFIED = "satisfied"
-IN_FLIGHT = "in_flight"
 
 
 @dataclass
 class StateEntry:
     status: str
     updated_at: str
-    file_id: int | None = None
-    guid: str | None = None
-    file_id_at_grab: int | None = None
 
 
 def _now_iso() -> str:
@@ -61,7 +59,9 @@ class StateManager:
         for app, items in raw.items():
             bucket = self._data.setdefault(app, {})
             for item_id, entry in items.items():
-                bucket[str(item_id)] = StateEntry(**entry)
+                bucket[str(item_id)] = StateEntry(
+                    status=entry["status"], updated_at=entry["updated_at"]
+                )
 
     def _save_locked(self) -> None:
         serializable = {
@@ -79,57 +79,23 @@ class StateManager:
                 os.remove(tmp)
             raise
 
-    # ----- reads -----
-
     def get(self, app: str, item_id: int) -> StateEntry | None:
         return self._data.get(app, {}).get(str(item_id))
 
-    def in_flight_ids(self, app: str) -> set[int]:
-        return {
-            int(item_id)
-            for item_id, entry in self._data.get(app, {}).items()
-            if entry.status == IN_FLIGHT
-        }
-
     def is_active(self, app: str, item_id: int, now: datetime, reevaluate_after_days: int) -> bool:
-        """An item is active (worth picking) unless it's in flight or satisfied within
-        the reevaluate window. Expired satisfied entries are active again."""
+        """An item is active (worth picking) unless it's satisfied within the reevaluate
+        window. Expired satisfied entries become active again."""
         entry = self.get(app, item_id)
-        if entry is None:
+        if entry is None or entry.status != SATISFIED:
             return True
-        if entry.status == IN_FLIGHT:
-            return False
-        if entry.status == SATISFIED:
-            ts = parse_iso(entry.updated_at)
-            if ts is None:
-                return True
-            age_days = (now - ts).total_seconds() / 86400
-            return age_days >= reevaluate_after_days
-        return True
+        ts = parse_iso(entry.updated_at)
+        if ts is None:
+            return True
+        return (now - ts).total_seconds() / 86400 >= reevaluate_after_days
 
-    # ----- writes -----
-
-    def mark_satisfied(self, app: str, item_id: int, file_id: int | None) -> None:
+    def mark_satisfied(self, app: str, item_id: int) -> None:
         with self._lock:
             self._data.setdefault(app, {})[str(item_id)] = StateEntry(
-                status=SATISFIED, updated_at=_now_iso(), file_id=file_id
+                status=SATISFIED, updated_at=_now_iso()
             )
-            self._save_locked()
-
-    def mark_in_flight(
-        self, app: str, item_id: int, guid: str, file_id_at_grab: int | None
-    ) -> None:
-        with self._lock:
-            self._data.setdefault(app, {})[str(item_id)] = StateEntry(
-                status=IN_FLIGHT,
-                updated_at=_now_iso(),
-                guid=guid,
-                file_id_at_grab=file_id_at_grab,
-            )
-            self._save_locked()
-
-    def clear(self, app: str, item_id: int) -> None:
-        """Reset an item to unprocessed (e.g. a failed grab that must be retried)."""
-        with self._lock:
-            self._data.get(app, {}).pop(str(item_id), None)
             self._save_locked()
