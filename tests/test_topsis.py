@@ -1,11 +1,8 @@
-from optimizarr.config import TopsisConfig
-from optimizarr.topsis import (
+from optimizarr.features.optimizer.config import TopsisConfig
+from optimizarr.features.optimizer.topsis import (
     GB,
     Topsis,
-    all_gates_pass,
     eligible,
-    max_allowed_resolution,
-    winning_path,
 )
 
 
@@ -87,51 +84,23 @@ def test_rank_orders_by_closeness_and_pick_is_top():
     assert diag["input"] == 2
 
 
-def test_gates_path_a_shrink():
+def test_should_swap_when_closeness_gain_meets_threshold():
+    t = _topsis()  # default min_closeness_gain = 0.02
+    # The Marvels case: small-but-real closeness gain from a smaller, higher-score file.
+    assert t.should_swap(pick_closeness=0.991, current_closeness=0.944)
+
+
+def test_should_not_swap_when_gain_below_threshold():
     t = _topsis()
-    # Equal closeness, big size savings -> path A passes.
-    gates = t.evaluate_gates(
-        pick_closeness=0.80,
-        pick_size_bytes=int(8 * GB),
-        current_closeness=0.74,
-        current_size_bytes=int(15 * GB),
-    )
-    assert winning_path(gates) == "path_a"
-    assert all_gates_pass(gates)
+    assert not t.should_swap(pick_closeness=0.951, current_closeness=0.944)  # +0.007 < 0.02
 
 
-def test_gates_path_b_upgrade_tolerates_size_increase():
+def test_should_not_swap_on_quality_regression():
     t = _topsis()
-    # Large closeness gain but size grows -> path A fails on savings, path B passes.
-    gates = t.evaluate_gates(
-        pick_closeness=0.90,
-        pick_size_bytes=int(25 * GB),
-        current_closeness=0.70,
-        current_size_bytes=int(10 * GB),
-    )
-    assert winning_path(gates) == "path_b"
+    assert not t.should_swap(pick_closeness=0.90, current_closeness=0.95)  # negative gain
 
 
-def test_gates_hold_when_marginal():
+def test_should_swap_treats_unknown_current_as_worst():
     t = _topsis()
-    gates = t.evaluate_gates(
-        pick_closeness=0.701,
-        pick_size_bytes=int(10 * GB),
-        current_closeness=0.70,
-        current_size_bytes=int(10 * GB),
-    )
-    assert not all_gates_pass(gates)
-
-
-def test_max_allowed_resolution_nested():
-    items = [
-        {"allowed": False, "quality": {"resolution": 480}},
-        {
-            "allowed": True,
-            "items": [
-                {"allowed": True, "quality": {"resolution": 1080}},
-                {"allowed": True, "quality": {"resolution": 2160}},
-            ],
-        },
-    ]
-    assert max_allowed_resolution(items) == 2160
+    # No score on the current file -> baseline 0.0 -> any decent pick clears the bar.
+    assert t.should_swap(pick_closeness=0.5, current_closeness=None)

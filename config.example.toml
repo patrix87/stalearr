@@ -63,12 +63,10 @@ resolution_anti_ideal = 480
 # Adaptive score floor: prefer >= preferred; never go more than drop_from_top below the pool top.
 score_floor_preferred = 900000
 score_drop_from_top = 250000
-# Path A (shrink): closeness gain AND size savings both required.
-min_closeness_gain = 0.05
-min_size_savings_gb = 0.5
-# Path B (upgrade): large closeness gain, size increase tolerated.
-allow_upgrades = true
-min_closeness_gain_for_upgrade = 0.10
+# Swap when the pick's closeness beats the current file's by at least this much.
+# Closeness already folds in score, resolution, and size (envelope + weights), so this one
+# small threshold covers both shrinks and quality upgrades. Tune the weights, not paths.
+min_closeness_gain = 0.02
 
 # Default TOPSIS weights (must sum to 1.0).
 [optimizer.topsis.weights]

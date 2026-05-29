@@ -39,14 +39,9 @@ flowchart TD
     S --> R["Rank by closeness to ideal"]
     R --> PICK["Pick = highest closeness"]
 
-    PICK --> GA{"Path A — shrink<br/>closeness gain >= min<br/>AND size savings >= min?"}
-    PICK --> GB{"Path B — upgrade<br/>closeness gain >= upgrade min?"}
-    GA -->|pass| ACT["ACT — POST grab {guid, indexerId}"]
-    GB -->|pass| ACT
-    GA -->|fail| OR{"either path passed?"}
-    GB -->|fail| OR
-    OR -->|no| HOLD["HOLD — mark satisfied"]
-    OR -->|yes| ACT
+    PICK --> G{"closeness(pick) − closeness(current)<br/>>= min_closeness_gain?"}
+    G -->|yes| ACT["ACT — POST grab {guid, indexerId}"]
+    G -->|no| HOLD["HOLD — mark satisfied"]
 ```
 
 ### Pipeline notes
@@ -58,9 +53,12 @@ flowchart TD
 - TOPSIS weights and the size envelope (target/bloat GB/h) are **per profile**: a
   `2160p Quality` item is scored differently than `2160p Efficient`. Score dominates on
   Quality; size matters more on Efficient.
-- Two independent gates lead to ACT. **Path A** is "keep quality, save real disk space."
-  **Path B** is "materially better quality, size increase tolerated" (e.g. 1080p → 2160p).
-  Either passing is enough.
+- The swap decision is a **single threshold**: grab iff the pick's closeness beats the
+  current file's by at least `min_closeness_gain`. Because closeness already folds in score,
+  resolution, and size (via the per-profile envelope + weights), that one check naturally
+  covers both shrinking a bloated file (smaller → higher `n_size` → higher closeness) and a
+  genuine quality upgrade (e.g. 1080p → 2160p). The policy lives in the **weights**, not in
+  separate size/upgrade gates — so tuning behavior means tuning the weights.
 
 ---
 

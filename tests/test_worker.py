@@ -1,20 +1,13 @@
 from datetime import UTC, datetime
 
-from optimizarr.config import Connection, OptimizerAppConfig, OptimizerConfig, TopsisConfig
-from optimizarr.optimizer import (
-    ArrOptimizer,
-    OptimizerWorker,
-    RadarrOptimizer,
-    _AppContext,
-    decide,
-    format_decision,
-)
-from optimizarr.state import SATISFIED, StateManager
-from optimizarr.topsis import GB, Topsis
+from optimizarr.arr import ArrApi, RadarrApi
+from optimizarr.config import Connection
+from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerConfig, TopsisConfig
+from optimizarr.features.optimizer.state import SATISFIED, StateManager
+from optimizarr.features.optimizer.topsis import GB, Topsis
+from optimizarr.features.optimizer.worker import OptimizerWorker, _AppContext, age_ok
 
-
-def _topsis() -> Topsis:
-    return Topsis(TopsisConfig())
+NOW = datetime(2026, 5, 28, tzinfo=UTC)
 
 
 def _release(guid="g1", score=1_000_000, resolution=2160, size_gb=14.0):
@@ -38,120 +31,46 @@ def _file(score=200_000, resolution="1920x1080", size_gb=30.0):
     }
 
 
-NOW = datetime(2026, 5, 28, tzinfo=UTC)
+# ----- age gate -----
 
 
-def _radarr_adapter(min_age_days, release_type="digitalRelease"):
-    return RadarrOptimizer(
-        Connection(name="radarr", url="http://x", api_key="k"),
-        OptimizerAppConfig(min_age_days=min_age_days, release_type=release_type),
-    )
+def _radarr_api():
+    return RadarrApi(Connection(name="radarr", url="http://x", api_key="k"))
+
+
+def _opt_cfg(min_age_days, release_type="digitalRelease"):
+    return OptimizerAppConfig(min_age_days=min_age_days, release_type=release_type)
 
 
 def test_age_gate_disabled_passes_everything():
-    a = _radarr_adapter(min_age_days=0)
-    assert a.age_ok({"digitalRelease": "2026-05-27T00:00:00Z"}, NOW)  # 1 day old, still ok
-    assert a.age_ok({}, NOW)  # no date, still ok when gate off
+    api = _radarr_api()
+    cfg = _opt_cfg(0)
+    assert age_ok(api, {"digitalRelease": "2026-05-27T00:00:00Z"}, cfg, NOW)  # 1 day, still ok
+    assert age_ok(api, {}, cfg, NOW)  # no date, still ok when gate off
 
 
 def test_age_gate_blocks_recent_and_allows_old():
-    a = _radarr_adapter(min_age_days=14)
-    assert not a.age_ok({"digitalRelease": "2026-05-20T00:00:00Z"}, NOW)  # 8 days < 14
-    assert a.age_ok({"digitalRelease": "2026-01-01T00:00:00Z"}, NOW)  # old enough
-    assert not a.age_ok({}, NOW)  # unknown date is skipped when gating is on
+    api = _radarr_api()
+    cfg = _opt_cfg(14)
+    assert not age_ok(api, {"digitalRelease": "2026-05-20T00:00:00Z"}, cfg, NOW)  # 8d < 14
+    assert age_ok(api, {"digitalRelease": "2026-01-01T00:00:00Z"}, cfg, NOW)  # old enough
+    assert not age_ok(api, {}, cfg, NOW)  # unknown date is skipped when gating is on
 
 
 def test_age_gate_date_added_reads_movie_file():
-    a = _radarr_adapter(min_age_days=14, release_type="dateAdded")
+    api = _radarr_api()
+    cfg = _opt_cfg(14, release_type="dateAdded")
     item = {
         "digitalRelease": "2026-05-27T00:00:00Z",
         "movieFile": {"dateAdded": "2026-01-01T00:00:00Z"},
     }
-    assert a.age_ok(item, NOW)  # uses movieFile.dateAdded, which is old
-
-
-def test_format_decision_act_shows_current_and_pick():
-    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
-    d = decide(
-        _topsis(),
-        releases,
-        runtime_h=2.0,
-        profile_name="2160p Quality",
-        target_resolution=2160,
-        current_file=_file(score=200_000, resolution="1920x1080"),
-    )
-    msg = format_decision("radarr", "Movie (2024)", d, dry_run=True)
-    assert "would GRAB" in msg
-    assert "current:" in msg and "pick:" in msg
-    assert "profile=2160p Quality" in msg
-    assert "Δsize" in msg and "Δcloseness" in msg
-
-
-def test_format_decision_hold_shows_failing_gates():
-    # Marginal candidate -> HOLD, with gate detail explaining why.
-    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
-    current = _file(score=1_000_000, resolution="3840x2160", size_gb=14.0)
-    d = decide(
-        _topsis(),
-        releases,
-        runtime_h=2.0,
-        profile_name="2160p Quality",
-        target_resolution=2160,
-        current_file=current,
-    )
-    assert d.action == "HOLD"
-    msg = format_decision("radarr", "Movie (2024)", d, dry_run=False)
-    assert "HOLD" in msg
-    assert "gates not met:" in msg
-
-
-def test_decide_hold_when_no_candidates():
-    d = decide(
-        _topsis(),
-        [],
-        runtime_h=2.0,
-        profile_name=None,
-        target_resolution=None,
-        current_file=_file(),
-    )
-    assert d.action == "HOLD"
-
-
-def test_decide_act_on_clear_upgrade():
-    # Current is a bloated 1080p low-score file; candidate is a clean 2160p high-score.
-    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
-    d = decide(
-        _topsis(),
-        releases,
-        runtime_h=2.0,
-        profile_name="2160p Quality",
-        target_resolution=2160,
-        current_file=_file(score=200_000, resolution="1920x1080"),
-    )
-    assert d.action == "ACT"
-    assert d.release is not None
-    assert d.release["guid"] == "g1"
-
-
-def test_decide_hold_when_current_already_good():
-    # Current file is already excellent and small; nothing better.
-    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
-    current = _file(score=1_000_000, resolution="3840x2160", size_gb=14.0)
-    d = decide(
-        _topsis(),
-        releases,
-        runtime_h=2.0,
-        profile_name="2160p Quality",
-        target_resolution=2160,
-        current_file=current,
-    )
-    assert d.action == "HOLD"
+    assert age_ok(api, item, cfg, NOW)  # uses movieFile.dateAdded, which is old
 
 
 # ----- _process_one: grab vs HOLD, and what gets persisted -----
 
 
-class _ProcessAdapter(ArrOptimizer):
+class _ProcessAdapter(ArrApi):
     """Adapter double serving canned data to _process_one and recording grabs."""
 
     app = "radarr"
@@ -193,7 +112,7 @@ def _worker(state, dry_run=False):
 
 
 def _ctx(adapter):
-    ctx = _AppContext(adapter)
+    ctx = _AppContext(adapter, OptimizerAppConfig())
     ctx.items_by_id = {1: {"id": 1}}
     return ctx
 
@@ -240,7 +159,7 @@ def test_build_pool_holds_progress_across_refresh_then_resets(tmp_path):
     # until the whole active set is covered, then the pass resets.
     state = StateManager(str(tmp_path / "s.json"))
     w = _worker(state)
-    ctx = _AppContext(_ProcessAdapter([], None))
+    ctx = _AppContext(_ProcessAdapter([], None), OptimizerAppConfig())
     ctx.items_by_id = {1: {"id": 1}, 2: {"id": 2}, 3: {"id": 3}}
     now = datetime.now(UTC)
 
@@ -263,7 +182,7 @@ def test_build_pool_excludes_satisfied(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
     state.mark_satisfied("radarr", 2)
     w = _worker(state)
-    ctx = _AppContext(_ProcessAdapter([], None))
+    ctx = _AppContext(_ProcessAdapter([], None), OptimizerAppConfig())
     ctx.items_by_id = {1: {"id": 1}, 2: {"id": 2}}
     w._build_pool(ctx, datetime.now(UTC))
     assert ctx.pool == [1]  # satisfied item 2 is out of the pool

@@ -1,6 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
-from optimizarr.state import SATISFIED, StateManager
+from optimizarr.features.optimizer.state import SATISFIED, StateManager
 
 
 def _mgr(tmp_path):

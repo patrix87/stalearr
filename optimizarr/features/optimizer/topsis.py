@@ -10,13 +10,13 @@ Two pre-filters run before TOPSIS: a GB/h sanity floor (drop fake/low-bitrate en
 and an adaptive score floor (four tiers; negatives always dropped). closeness =
 d(anti-ideal) / (d(ideal) + d(anti-ideal)); pick the highest.
 
-All tuning comes from a TopsisConfig (see optimizarr.config); this module holds no
-tunable globals so behavior is fully driven by config.toml.
+All tuning comes from a TopsisConfig; this module holds no tunable globals so behavior is
+fully driven by config.toml.
 """
 
 import math
 
-from optimizarr.config import TopsisConfig
+from optimizarr.features.optimizer.config import TopsisConfig
 
 GB = 1024**3
 
@@ -268,87 +268,16 @@ class Topsis:
         )
         return (ranked[0] if ranked else None), diag
 
-    # ----- gates (swap decision) -----
+    # ----- swap decision -----
 
-    def evaluate_gates(
-        self,
-        pick_closeness: float,
-        pick_size_bytes: int,
-        current_closeness: float | None,
-        current_size_bytes: int,
-    ) -> list[tuple[str, bool | None, str]]:
-        """Evaluate swap gates across two paths to ACT.
-        Returns [(name, passed, detail)] with dotted path_a.* / path_b.* names."""
-        cfg = self.cfg
-        gates: list[tuple[str, bool | None, str]] = []
-        savings_gb = (current_size_bytes - pick_size_bytes) / GB
+    def closeness_gain(self, pick_closeness: float, current_closeness: float | None) -> float:
+        """How much closeness the pick adds over the current file. An unknown current
+        closeness (no score on the current file) is treated as the worst case (0.0)."""
+        baseline = current_closeness if current_closeness is not None else 0.0
+        return pick_closeness - baseline
 
-        if current_closeness is None:
-            gates.append(("path_a.closeness", None, "current closeness unknown"))
-            passed = savings_gb >= cfg.min_size_savings_gb
-            sign = ">=" if passed else "<"
-            detail = f"{savings_gb:+.2f} GB {sign} {cfg.min_size_savings_gb}"
-            gates.append(("path_a.size_savings", passed, detail))
-            return gates
-
-        gain = pick_closeness - current_closeness
-
-        a_close = gain >= cfg.min_closeness_gain
-        detail = f"d {gain:+.3f} {'>=' if a_close else '<'} {cfg.min_closeness_gain}"
-        gates.append(("path_a.closeness", a_close, detail))
-
-        a_size = savings_gb >= cfg.min_size_savings_gb
-        detail = f"{savings_gb:+.2f} GB {'>=' if a_size else '<'} {cfg.min_size_savings_gb}"
-        gates.append(("path_a.size_savings", a_size, detail))
-
-        if cfg.allow_upgrades:
-            min_up = cfg.min_closeness_gain_for_upgrade
-            b_close = gain >= min_up
-            detail = f"d {gain:+.3f} {'>=' if b_close else '<'} {min_up}"
-            gates.append(("path_b.closeness", b_close, detail))
-
-        return gates
-
-    def should_swap(
-        self,
-        pick_closeness: float,
-        current_closeness: float | None,
-        pick_size_bytes: int,
-        current_size_bytes: int,
-    ) -> bool:
-        gates = self.evaluate_gates(
-            pick_closeness, pick_size_bytes, current_closeness, current_size_bytes
-        )
-        return all_gates_pass(gates)
-
-
-def winning_path(gates: list[tuple[str, bool | None, str]]) -> str | None:
-    by_path: dict[str, list[bool | None]] = {}
-    for name, passed, _ in gates:
-        if "." not in name:
-            continue
-        by_path.setdefault(name.split(".", 1)[0], []).append(passed)
-    for path in ("path_a", "path_b"):
-        gs = by_path.get(path) or []
-        if gs and all(g is True for g in gs):
-            return path
-    return None
-
-
-def all_gates_pass(gates: list[tuple[str, bool | None, str]]) -> bool:
-    return winning_path(gates) is not None
-
-
-def max_allowed_resolution(profile_items: list[dict]) -> int:
-    """Max `resolution` over allowed entries in a Radarr/Sonarr quality profile's
-    items[] (with nested items[]). Returns 0 if nothing is allowed."""
-    best = 0
-    for it in profile_items or []:
-        q = it.get("quality") or {}
-        if it.get("allowed") and q.get("resolution"):
-            best = max(best, q["resolution"])
-        for sub in it.get("items") or []:
-            sq = sub.get("quality") or {}
-            if sub.get("allowed") and sq.get("resolution"):
-                best = max(best, sq["resolution"])
-    return best
+    def should_swap(self, pick_closeness: float, current_closeness: float | None) -> bool:
+        """Swap iff the pick improves overall closeness by at least min_closeness_gain.
+        Size and resolution are already folded into closeness (per-profile envelope +
+        weights), so this single threshold covers both shrinks and upgrades."""
+        return self.closeness_gain(pick_closeness, current_closeness) >= self.cfg.min_closeness_gain

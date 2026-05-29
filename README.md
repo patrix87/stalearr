@@ -40,9 +40,11 @@ already downloading and evaluates it:
    GB/h sanity floor, then an adaptive 4-tier score floor (negatives always dropped).
 3. Rank survivors with TOPSIS on three axes — score, resolution, size — using per-profile
    weights and size envelopes.
-4. If the top pick clears a swap gate (real size savings at equal quality, or a material
-   quality upgrade) → **grab it**. Otherwise → **HOLD** and mark the item *satisfied* so it
-   drops out of the pool until `reevaluate_after_days` elapses.
+4. If the top pick's overall closeness beats the current file's by at least
+   `min_closeness_gain` → **grab it**. Otherwise → **HOLD** and mark the item *satisfied* so
+   it drops out of the pool until `reevaluate_after_days` elapses. Closeness already weighs
+   score, resolution, and size together, so that single threshold covers both shrinking a
+   bloated file and upgrading quality — there's no separate size/upgrade gate to balance.
 
 A grab is never recorded as "done". Success simply shows up as a HOLD on the next
 evaluation (→ satisfied); a failed grab was never satisfied, so the item stays in the pool
