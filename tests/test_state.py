@@ -31,6 +31,7 @@ def test_mark_in_flight_tracked(tmp_path):
     m.mark_in_flight("sonarr", 7, guid="abc", file_id_at_grab=3)
     assert m.in_flight_ids("sonarr") == {7}
     entry = m.get("sonarr", 7)
+    assert entry is not None
     assert entry.status == IN_FLIGHT
     assert entry.guid == "abc"
     assert entry.file_id_at_grab == 3

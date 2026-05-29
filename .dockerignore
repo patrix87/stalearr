@@ -13,6 +13,6 @@ __pycache__
 README.md
 LICENSE
 tests
-docker-compose.yml
+compose.yml
 .env
 .env.example

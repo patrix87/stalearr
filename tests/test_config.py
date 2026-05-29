@@ -4,8 +4,6 @@ from optimizarr.config import load_config
 
 _MANAGED_ENV_VARS = [
     "LOG_LEVEL",
-    "CONFIG_PATH",
-    "STATE_PATH",
     "RADARR_URL",
     "RADARR_API_KEY",
     "SONARR_URL",
@@ -119,6 +117,39 @@ def test_rejects_weights_not_summing_to_one(monkeypatch, tmp_path):
         "[optimizer.topsis.weights]\nscore = 0.5\nresolution = 0.3\nsize = 0.3\n",
     )
     with pytest.raises(ValueError, match="sum to 1.0"):
+        load_config(path)
+
+
+def test_optimizer_app_age_gate_defaults(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    config = load_config(_write(tmp_path, ""))
+    assert config.optimizer.radarr.min_age_days == 0
+    assert config.optimizer.radarr.release_type == "digitalRelease"
+    assert config.optimizer.sonarr.release_type == "airDateUtc"
+
+
+def test_optimizer_app_age_gate_overrides(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(
+        tmp_path,
+        """
+        [optimizer.radarr]
+        min_age_days = 14
+        release_type = "inCinemas"
+        """,
+    )
+    config = load_config(path)
+    assert config.optimizer.radarr.min_age_days == 14
+    assert config.optimizer.radarr.release_type == "inCinemas"
+
+
+def test_rejects_invalid_optimizer_release_type(monkeypatch, tmp_path):
+    monkeypatch.setenv("SONARR_URL", "http://x")
+    monkeypatch.setenv("SONARR_API_KEY", "k")
+    path = _write(tmp_path, '[optimizer.sonarr]\nrelease_type = "digitalRelease"\n')
+    with pytest.raises(ValueError, match="optimizer.sonarr.release_type"):
         load_config(path)
 
 

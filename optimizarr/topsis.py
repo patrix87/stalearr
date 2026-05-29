@@ -61,14 +61,17 @@ class Topsis:
     # ----- weights & envelopes -----
 
     def weights_for(self, profile_name: str | None) -> dict[str, float]:
-        return self.cfg.weights_by_profile.get(profile_name) or self.cfg.weights
+        by_profile = self.cfg.weights_by_profile.get(profile_name) if profile_name else None
+        return by_profile or self.cfg.weights
 
     def envelope_for_release(
         self, profile_name: str | None, release_resolution: int
     ) -> tuple[float, float]:
         """(target_gbh, bloat_gbh). Profile-specific envelope when the release matches
         the profile's target resolution; per-resolution defaults otherwise."""
-        profile_env = self.cfg.size_envelope_by_profile.get(profile_name) or {}
+        profile_env = (
+            self.cfg.size_envelope_by_profile.get(profile_name) if profile_name else None
+        ) or {}
         if release_resolution in profile_env:
             return profile_env[release_resolution]
         return self.cfg.size_envelope_by_resolution.get(release_resolution, (3.0, 25.0))
@@ -124,7 +127,7 @@ class Topsis:
         self, releases: list[dict], runtime_h: float, current_file_score: int | None
     ) -> tuple[list[dict], dict]:
         """Run all pre-filters in order; return (kept, diag) with per-stage counts."""
-        diag = {"input": len(releases)}
+        diag: dict[str, object] = {"input": len(releases)}
         after_hard = eligible(releases)
         diag["after_hard_rejections"] = len(after_hard)
         after_gbh = self.filter_by_gbh_floor(after_hard, runtime_h)

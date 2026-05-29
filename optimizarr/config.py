@@ -2,6 +2,7 @@ import logging
 import os
 import tomllib
 from dataclasses import dataclass, field
+from typing import Any
 
 logger = logging.getLogger("optimizarr")
 
@@ -20,8 +21,10 @@ SONARR_RELEASE_TYPES = {
 
 PICK_ORDERS = {"random", "ordered"}
 
-DEFAULT_CONFIG_PATH = "/config/config.toml"
-DEFAULT_STATE_PATH = "/data/state.json"
+# In-container paths. optimizarr runs in Docker with /config and /data mounted; these
+# are not env-configurable. Edit them here if you ever run outside a container.
+CONFIG_PATH = "/config/config.toml"
+STATE_PATH = "/data/state.json"
 
 
 # ===== Connection (from env: secrets + URLs only) =====
@@ -97,6 +100,15 @@ class TopsisConfig:
 
 
 @dataclass
+class OptimizerAppConfig:
+    # Only consider items at least this many days past their release date.
+    # 0 = no age gate (consider everything with a file). release_type selects which
+    # date field the age is measured from (same fields as the unmonitor feature).
+    min_age_days: int = 0
+    release_type: str = ""
+
+
+@dataclass
 class OptimizerConfig:
     enabled: bool = False
     apps: list[str] = field(default_factory=lambda: ["radarr", "sonarr"])
@@ -106,6 +118,12 @@ class OptimizerConfig:
     queue_recheck_seconds: int = 60
     list_refresh_minutes: int = 60
     reevaluate_after_days: int = 30
+    radarr: OptimizerAppConfig = field(
+        default_factory=lambda: OptimizerAppConfig(release_type="digitalRelease")
+    )
+    sonarr: OptimizerAppConfig = field(
+        default_factory=lambda: OptimizerAppConfig(release_type="airDateUtc")
+    )
     topsis: TopsisConfig = field(default_factory=TopsisConfig)
 
 
@@ -120,7 +138,7 @@ class Config:
     optimizer: OptimizerConfig
 
 
-# ===== env helpers (secrets, URLs, paths only) =====
+# ===== env helpers (secrets + URLs only) =====
 
 
 def _load_connection(prefix: str) -> Connection | None:
@@ -134,8 +152,8 @@ def _load_connection(prefix: str) -> Connection | None:
 # ===== TOML parsing helpers =====
 
 
-def _int_keyed(raw: dict, where: str) -> dict[int, object]:
-    out: dict[int, object] = {}
+def _int_keyed(raw: dict, where: str) -> dict[int, Any]:
+    out: dict[int, Any] = {}
     for k, v in raw.items():
         try:
             out[int(k)] = v
@@ -244,6 +262,18 @@ def _parse_unmonitor(raw: dict) -> UnmonitorConfig:
     )
 
 
+def _parse_optimizer_app(
+    raw: dict, default_release_type: str, allowed: set[str], where: str
+) -> OptimizerAppConfig:
+    release_type = str(raw.get("release_type", default_release_type)).strip()
+    if release_type not in allowed:
+        raise ValueError(f"{where}.release_type={release_type!r} not in {sorted(allowed)}")
+    return OptimizerAppConfig(
+        min_age_days=int(raw.get("min_age_days", 0)),
+        release_type=release_type,
+    )
+
+
 def _parse_optimizer(raw: dict) -> OptimizerConfig:
     apps = raw.get("apps", ["radarr", "sonarr"])
     if not isinstance(apps, list) or any(a not in ("radarr", "sonarr") for a in apps):
@@ -262,6 +292,12 @@ def _parse_optimizer(raw: dict) -> OptimizerConfig:
         queue_recheck_seconds=int(raw.get("queue_recheck_seconds", 60)),
         list_refresh_minutes=int(raw.get("list_refresh_minutes", 60)),
         reevaluate_after_days=int(raw.get("reevaluate_after_days", 30)),
+        radarr=_parse_optimizer_app(
+            raw.get("radarr", {}), "digitalRelease", RADARR_RELEASE_TYPES, "optimizer.radarr"
+        ),
+        sonarr=_parse_optimizer_app(
+            raw.get("sonarr", {}), "airDateUtc", SONARR_RELEASE_TYPES, "optimizer.sonarr"
+        ),
         topsis=_parse_topsis(raw.get("topsis", {})),
     )
 
@@ -275,12 +311,12 @@ def load_config(config_path: str | None = None) -> Config:
             "Set RADARR_URL+RADARR_API_KEY and/or SONARR_URL+SONARR_API_KEY."
         )
 
-    path = config_path or os.environ.get("CONFIG_PATH", DEFAULT_CONFIG_PATH)
+    path = config_path or CONFIG_PATH
     try:
         with open(path, "rb") as f:
             raw = tomllib.load(f)
     except FileNotFoundError as e:
-        raise ValueError(f"Config file not found at {path!r} (set CONFIG_PATH to override)") from e
+        raise ValueError(f"Config file not found at {path!r}") from e
     except tomllib.TOMLDecodeError as e:
         raise ValueError(f"Config file {path!r} is not valid TOML: {e}") from e
 
@@ -291,7 +327,7 @@ def load_config(config_path: str | None = None) -> Config:
     return Config(
         dry_run=bool(raw.get("dry_run", False)),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
-        state_path=os.environ.get("STATE_PATH", DEFAULT_STATE_PATH),
+        state_path=STATE_PATH,
         radarr=radarr,
         sonarr=sonarr,
         unmonitor=_parse_unmonitor(raw.get("unmonitor", {})),

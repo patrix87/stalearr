@@ -6,12 +6,8 @@ services:
     environment:
       TZ: America/Toronto
       LOG_LEVEL: INFO
-      CONFIG_PATH: /config/config.toml
-      STATE_PATH: /data/state.json
-
       RADARR_URL: http://radarr:7878
       RADARR_API_KEY: ${RADARR_API_KEY}
-
       SONARR_URL: http://sonarr:8989
       SONARR_API_KEY: ${SONARR_API_KEY}
     volumes:

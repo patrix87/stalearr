@@ -15,6 +15,20 @@ Both features are optional and independent. See
 [docs/optimizer-design.md](docs/optimizer-design.md) for the full algorithm and worker-loop
 design (with diagrams).
 
+## Designed for Profilarr quality profiles
+
+optimizarr is built to pair with **[Profilarr](https://github.com/Dictionarry-Hub/profilarr)**.
+The defaults assume Profilarr's custom-format scoring convention — a "perfect" release
+scores around **1,000,000** — and the per-profile tuning (weights, size envelopes) is keyed
+by **quality-profile names** like `2160p Quality` or `1080p Efficient`. If you run Profilarr,
+the defaults work out of the box.
+
+It is **not strictly required**, though. The score scale and the profile-name-keyed tuning
+are all configurable: set `score_ideal` to match your own scoring target, and add entries
+under `weights_by_profile` / `size_envelope_by_profile` keyed by *your* profile names. With
+those adjusted, optimizarr works against any custom-format scoring scheme — Profilarr just
+saves you from tuning it yourself.
+
 ## How the optimizer works (short version)
 
 For each item with a file, on its own queue-gated interval:
@@ -46,8 +60,6 @@ Two-part configuration:
 | --- | --- | --- |
 | `RADARR_URL` / `RADARR_API_KEY` | unset | Set both to enable Radarr. |
 | `SONARR_URL` / `SONARR_API_KEY` | unset | Set both to enable Sonarr. |
-| `CONFIG_PATH` | `/config/config.toml` | Path to the TOML config. |
-| `STATE_PATH` | `/data/state.json` | Path to the optimizer state file. |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`. |
 | `TZ` | container default | Affects cron evaluation and log timestamps. |
 
@@ -72,14 +84,20 @@ release_type = "airDateUtc"       # airDateUtc|dateAdded
 require_cutoff_met = true
 
 [optimizer]
-enabled = false
+enabled = true
 apps = ["radarr", "sonarr"]
 queue_max = 0                     # only act when the queue has <= this many items (0 = empty)
 pick_order = "random"             # random|ordered
 process_interval_seconds = 10     # settle delay after a grab so it surfaces in the queue
 queue_recheck_seconds = 60
 list_refresh_minutes = 60
-reevaluate_after_days = 30
+reevaluate_after_days = 30        # reconsider a "satisfied" item this many days later
+[optimizer.radarr]
+min_age_days = 30                  # only optimize items N days past release (0 = no gate)
+release_type = "digitalRelease"   # date field the age is measured from
+[optimizer.sonarr]
+min_age_days = 30
+release_type = "airDateUtc"
 ```
 
 The `[optimizer.topsis]` block (weights, size envelopes, score floor, swap gates — all
@@ -102,8 +120,6 @@ services:
     environment:
       TZ: America/Toronto
       LOG_LEVEL: INFO
-      CONFIG_PATH: /config/config.toml
-      STATE_PATH: /data/state.json
       RADARR_URL: http://radarr:7878
       RADARR_API_KEY: ${RADARR_API_KEY}
       SONARR_URL: http://sonarr:8989
@@ -127,8 +143,10 @@ uv run ruff check .
 uv run ruff format --check .
 
 # Run against a real Radarr/Sonarr without Docker:
-cp .env.example .env             # fill in URLs + API keys + CONFIG_PATH/STATE_PATH
+cp .env.example .env             # fill in URLs + API keys
 cp config.example.toml config.toml
+# optimizarr reads /config/config.toml and writes /data/state.json by default;
+# to run outside Docker, edit CONFIG_PATH / STATE_PATH at the top of optimizarr/config.py.
 uv run --env-file .env python -m optimizarr
 ```
 

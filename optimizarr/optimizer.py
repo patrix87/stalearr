@@ -14,21 +14,30 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from optimizarr.config import Config, Connection, OptimizerConfig
+from optimizarr.config import Config, Connection, OptimizerAppConfig, OptimizerConfig
+from optimizarr.dates import age_days
 from optimizarr.http import ArrClient
 from optimizarr.state import StateManager
-from optimizarr.topsis import Topsis, max_allowed_resolution
+from optimizarr.topsis import Topsis, max_allowed_resolution, winning_path
 
 logger = logging.getLogger("optimizarr")
+
+_PATH_LABELS = {
+    "path_a": "shrink (smaller at equal quality)",
+    "path_b": "upgrade (better quality)",
+}
 
 
 @dataclass
 class Decision:
     action: str  # "ACT" or "HOLD"
     reason: str
-    release: dict | None = None
-    pick_closeness: float | None = None
-    current_closeness: float | None = None
+    profile_name: str | None = None
+    current: dict | None = None  # {score, resolution, gbh, size_gb, closeness}
+    pick: dict | None = None  # {score, resolution, gbh, size_gb, closeness, title}
+    path: str | None = None  # winning gate path for ACT ("path_a"/"path_b")
+    gates: list | None = None
+    release: dict | None = None  # raw release to grab (ACT only)
     diag: dict | None = None
 
 
@@ -40,37 +49,108 @@ def decide(
     target_resolution: int | None,
     current_file: dict | None,
 ) -> Decision:
-    """Pure decision: given fetched data, return ACT (with the release) or HOLD."""
+    """Pure decision: given fetched data, return ACT (with the release) or HOLD,
+    carrying the current-vs-pick details that the worker logs."""
     current_file_score = (current_file or {}).get("customFormatScore")
     pick, diag = topsis.pick(
         releases, runtime_h, profile_name, target_resolution, current_file_score
     )
-    if pick is None:
-        return Decision("HOLD", f"no candidate ({diag['score_floor_tier']})", diag=diag)
-
-    release, _attrs, pick_closeness = pick
-    current_closeness, _ = topsis.closeness_for_current_file(
+    current_closeness, cur_raw = topsis.closeness_for_current_file(
         current_file or {}, runtime_h, profile_name, target_resolution
     )
+    current = {"closeness": current_closeness, **cur_raw}
+
+    if pick is None:
+        return Decision(
+            "HOLD",
+            f"no viable candidate ({diag['score_floor_tier']})",
+            profile_name=profile_name,
+            current=current,
+            diag=diag,
+        )
+
+    release, attrs, pick_closeness = pick
+    raw = attrs["raw"]
+    pick_info = {"closeness": pick_closeness, "title": release.get("title", "?"), **raw}
+
     pick_size = release.get("size", 0)
     current_size = (current_file or {}).get("size", 0) or 0
+    gates = topsis.evaluate_gates(pick_closeness, pick_size, current_closeness, current_size)
+    path = winning_path(gates)
 
-    if topsis.should_swap(pick_closeness, current_closeness, pick_size, current_size):
+    if path is not None:
         return Decision(
             "ACT",
-            "better release available",
+            _PATH_LABELS.get(path, path),
+            profile_name=profile_name,
+            current=current,
+            pick=pick_info,
+            path=path,
+            gates=gates,
             release=release,
-            pick_closeness=pick_closeness,
-            current_closeness=current_closeness,
             diag=diag,
         )
     return Decision(
         "HOLD",
         "nothing better than current file",
-        pick_closeness=pick_closeness,
-        current_closeness=current_closeness,
+        profile_name=profile_name,
+        current=current,
+        pick=pick_info,
+        gates=gates,
         diag=diag,
     )
+
+
+def _fmt_side(side: dict | None) -> str:
+    if not side:
+        return "n/a"
+    score = side.get("score")
+    score_s = f"{score:,}" if score is not None else "n/a"
+    clo = side.get("closeness")
+    clo_s = f"{clo:.3f}" if clo is not None else "n/a"
+    res = side.get("resolution") or 0
+    res_s = f"{res}p" if res else "?"
+    return (
+        f"score={score_s} res={res_s} size={side.get('size_gb', 0):.1f}GB "
+        f"({side.get('gbh', 0):.1f} GB/h) closeness={clo_s}"
+    )
+
+
+def _fmt_deltas(current: dict | None, pick: dict | None) -> str:
+    if not current or not pick:
+        return ""
+    parts = []
+    c_clo, p_clo = current.get("closeness"), pick.get("closeness")
+    if c_clo is not None and p_clo is not None:
+        parts.append(f"Δcloseness {p_clo - c_clo:+.3f}")
+    parts.append(f"Δsize {pick.get('size_gb', 0) - current.get('size_gb', 0):+.1f}GB")
+    return "  (" + ", ".join(parts) + ")" if parts else ""
+
+
+def format_decision(app: str, label: str, decision: Decision, dry_run: bool) -> str:
+    """Multi-line, human-readable explanation of one decision (current vs pick)."""
+    profile = decision.profile_name or "?"
+    if decision.action == "ACT":
+        verb = "would GRAB" if dry_run else "GRAB"
+        head = (
+            f"[{app}] {verb} — {label}  [profile={profile}]  via {decision.path} {decision.reason}"
+        )
+    else:
+        head = f"[{app}] HOLD — {label}  [profile={profile}]  ({decision.reason})"
+
+    lines = [head, f"    current: {_fmt_side(decision.current)}"]
+    if decision.pick:
+        candidate_label = "pick" if decision.action == "ACT" else "best   "
+        lines.append(
+            f"    {candidate_label}: {_fmt_side(decision.pick)}"
+            f"{_fmt_deltas(decision.current, decision.pick)}"
+        )
+        lines.append(f"    release: {decision.pick.get('title', '?')}")
+    if decision.action == "HOLD" and decision.gates:
+        failed = [f"{n} [{d}]" for n, ok, d in decision.gates if ok is not True]
+        if failed:
+            lines.append(f"    gates not met: {'; '.join(failed)}")
+    return "\n".join(lines)
 
 
 # ===== App adapters =====
@@ -81,9 +161,22 @@ class ArrOptimizer:
 
     app: str
 
-    def __init__(self, conn: Connection):
+    def __init__(self, conn: Connection, app_cfg: OptimizerAppConfig):
         self.client = ArrClient(conn.url, conn.api_key)
+        self.min_age_days = app_cfg.min_age_days
+        self.release_type = app_cfg.release_type
         self._profiles: dict[int, tuple[str, int]] = {}
+
+    def age_ok(self, item: dict, now: datetime) -> bool:
+        """True if the item is old enough to consider. With min_age_days <= 0 there is
+        no gate. When gating is on and the release date is unknown, the item is skipped."""
+        if self.min_age_days <= 0:
+            return True
+        age = age_days(self.reference_date(item), now)
+        return age is not None and age >= self.min_age_days
+
+    def reference_date(self, item: dict) -> str | None:
+        raise NotImplementedError
 
     def refresh_profiles(self) -> None:
         profiles = self.client.get("/api/v3/qualityprofile") or []
@@ -105,7 +198,7 @@ class ArrOptimizer:
         )
 
     # Subclasses implement the rest.
-    def list_items(self) -> list[dict]:
+    def list_items(self, now: datetime) -> list[dict]:
         raise NotImplementedError
 
     def queue(self) -> tuple[int, set[int]]:
@@ -144,12 +237,17 @@ def _queue_ids(client: ArrClient, id_field: str) -> tuple[int, set[int]]:
 class RadarrOptimizer(ArrOptimizer):
     app = "radarr"
 
-    def list_items(self) -> list[dict]:
+    def list_items(self, now: datetime) -> list[dict]:
         # Select on hasFile alone, not monitored: the optimizer improves the existing
         # library, and the unmonitor feature deliberately strips monitoring once a file
         # exists — so a monitored filter would leave nothing to optimize.
         movies = self.client.get("/api/v3/movie") or []
-        return [m for m in movies if m.get("hasFile")]
+        return [m for m in movies if m.get("hasFile") and self.age_ok(m, now)]
+
+    def reference_date(self, item: dict) -> str | None:
+        if self.release_type == "dateAdded":
+            return (item.get("movieFile") or {}).get("dateAdded")
+        return item.get(self.release_type)
 
     def queue(self) -> tuple[int, set[int]]:
         return _queue_ids(self.client, "movieId")
@@ -182,11 +280,11 @@ class RadarrOptimizer(ArrOptimizer):
 class SonarrOptimizer(ArrOptimizer):
     app = "sonarr"
 
-    def __init__(self, conn: Connection):
-        super().__init__(conn)
+    def __init__(self, conn: Connection, app_cfg: OptimizerAppConfig):
+        super().__init__(conn, app_cfg)
         self._series_by_id: dict[int, dict] = {}
 
-    def list_items(self) -> list[dict]:
+    def list_items(self, now: datetime) -> list[dict]:
         series_list = self.client.get("/api/v3/series") or []
         self._series_by_id = {s["id"]: s for s in series_list}
         items: list[dict] = []
@@ -195,8 +293,13 @@ class SonarrOptimizer(ArrOptimizer):
                 self.client.get(f"/api/v3/episode?seriesId={series['id']}&includeEpisodeFile=true")
                 or []
             )
-            items.extend(ep for ep in episodes if ep.get("hasFile"))
+            items.extend(ep for ep in episodes if ep.get("hasFile") and self.age_ok(ep, now))
         return items
+
+    def reference_date(self, item: dict) -> str | None:
+        if self.release_type == "dateAdded":
+            return (item.get("episodeFile") or {}).get("dateAdded")
+        return item.get(self.release_type)
 
     def queue(self) -> tuple[int, set[int]]:
         return _queue_ids(self.client, "episodeId")
@@ -230,8 +333,9 @@ class SonarrOptimizer(ArrOptimizer):
         return self.client.get(f"/api/v3/release?episodeId={item['id']}") or []
 
 
-def build_adapter(app: str, conn: Connection) -> ArrOptimizer:
-    return RadarrOptimizer(conn) if app == "radarr" else SonarrOptimizer(conn)
+def build_adapter(app: str, conn: Connection, app_cfg: OptimizerAppConfig) -> ArrOptimizer:
+    cls = RadarrOptimizer if app == "radarr" else SonarrOptimizer
+    return cls(conn, app_cfg)
 
 
 # ===== Worker =====
@@ -264,11 +368,13 @@ class OptimizerWorker:
         self._stop = threading.Event()
 
         conns = {"radarr": config.radarr, "sonarr": config.sonarr}
-        self.contexts: dict[str, _AppContext] = {
-            app: _AppContext(build_adapter(app, conns[app]))
-            for app in self.opt.apps
-            if conns[app] is not None
-        }
+        app_cfgs = {"radarr": self.opt.radarr, "sonarr": self.opt.sonarr}
+        self.contexts: dict[str, _AppContext] = {}
+        for app in self.opt.apps:
+            conn = conns[app]
+            if conn is None:
+                continue
+            self.contexts[app] = _AppContext(build_adapter(app, conn, app_cfgs[app]))
 
     def stop(self) -> None:
         self._stop.set()
@@ -278,7 +384,7 @@ class OptimizerWorker:
     def _refresh(self, ctx: _AppContext, now: datetime) -> None:
         adapter = ctx.adapter
         adapter.refresh_profiles()
-        items = adapter.list_items()
+        items = adapter.list_items(now)
         ctx.items_by_id = {adapter.item_id(it): it for it in items}
         ctx.evaluated.clear()
         ctx.last_refresh = now
@@ -324,20 +430,17 @@ class OptimizerWorker:
 
         decision = decide(self.topsis, releases, runtime_h, profile_name, target_res, current_file)
         label = adapter.label(item)
+        logger.info("%s", format_decision(adapter.app, label, decision, self.dry_run))
 
         if decision.action == "HOLD":
-            logger.info("[%s] HOLD %s — %s", adapter.app, label, decision.reason)
             if not self.dry_run:
                 self.state.mark_satisfied(adapter.app, item_id, adapter.current_file_id(item))
             return
 
-        release = decision.release or {}
-        title = release.get("title", "?")
         if self.dry_run:
-            logger.info("[%s] would GRAB for %s: %s", adapter.app, label, title)
             return
 
-        logger.info("[%s] GRAB for %s: %s", adapter.app, label, title)
+        release = decision.release or {}
         adapter.grab(release)
         self.state.mark_in_flight(
             adapter.app, item_id, release.get("guid", ""), adapter.current_file_id(item)

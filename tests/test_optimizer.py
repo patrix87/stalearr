@@ -1,5 +1,14 @@
-from optimizarr.config import TopsisConfig
-from optimizarr.optimizer import OptimizerWorker, decide
+from datetime import UTC, datetime
+
+from optimizarr.config import Connection, OptimizerAppConfig, OptimizerConfig, TopsisConfig
+from optimizarr.optimizer import (
+    ArrOptimizer,
+    OptimizerWorker,
+    RadarrOptimizer,
+    _AppContext,
+    decide,
+    format_decision,
+)
 from optimizarr.state import IN_FLIGHT, SATISFIED, StateManager
 from optimizarr.topsis import GB, Topsis
 
@@ -29,6 +38,73 @@ def _file(score=200_000, resolution="1920x1080", size_gb=30.0):
     }
 
 
+NOW = datetime(2026, 5, 28, tzinfo=UTC)
+
+
+def _radarr_adapter(min_age_days, release_type="digitalRelease"):
+    return RadarrOptimizer(
+        Connection(name="radarr", url="http://x", api_key="k"),
+        OptimizerAppConfig(min_age_days=min_age_days, release_type=release_type),
+    )
+
+
+def test_age_gate_disabled_passes_everything():
+    a = _radarr_adapter(min_age_days=0)
+    assert a.age_ok({"digitalRelease": "2026-05-27T00:00:00Z"}, NOW)  # 1 day old, still ok
+    assert a.age_ok({}, NOW)  # no date, still ok when gate off
+
+
+def test_age_gate_blocks_recent_and_allows_old():
+    a = _radarr_adapter(min_age_days=14)
+    assert not a.age_ok({"digitalRelease": "2026-05-20T00:00:00Z"}, NOW)  # 8 days < 14
+    assert a.age_ok({"digitalRelease": "2026-01-01T00:00:00Z"}, NOW)  # old enough
+    assert not a.age_ok({}, NOW)  # unknown date is skipped when gating is on
+
+
+def test_age_gate_date_added_reads_movie_file():
+    a = _radarr_adapter(min_age_days=14, release_type="dateAdded")
+    item = {
+        "digitalRelease": "2026-05-27T00:00:00Z",
+        "movieFile": {"dateAdded": "2026-01-01T00:00:00Z"},
+    }
+    assert a.age_ok(item, NOW)  # uses movieFile.dateAdded, which is old
+
+
+def test_format_decision_act_shows_current_and_pick():
+    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
+    d = decide(
+        _topsis(),
+        releases,
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=_file(score=200_000, resolution="1920x1080"),
+    )
+    msg = format_decision("radarr", "Movie (2024)", d, dry_run=True)
+    assert "would GRAB" in msg
+    assert "current:" in msg and "pick:" in msg
+    assert "profile=2160p Quality" in msg
+    assert "Δsize" in msg and "Δcloseness" in msg
+
+
+def test_format_decision_hold_shows_failing_gates():
+    # Marginal candidate -> HOLD, with gate detail explaining why.
+    releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]
+    current = _file(score=1_000_000, resolution="3840x2160", size_gb=14.0)
+    d = decide(
+        _topsis(),
+        releases,
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=current,
+    )
+    assert d.action == "HOLD"
+    msg = format_decision("radarr", "Movie (2024)", d, dry_run=False)
+    assert "HOLD" in msg
+    assert "gates not met:" in msg
+
+
 def test_decide_hold_when_no_candidates():
     d = decide(
         _topsis(),
@@ -53,6 +129,7 @@ def test_decide_act_on_clear_upgrade():
         current_file=_file(score=200_000, resolution="1920x1080"),
     )
     assert d.action == "ACT"
+    assert d.release is not None
     assert d.release["guid"] == "g1"
 
 
@@ -74,7 +151,7 @@ def test_decide_hold_when_current_already_good():
 # ----- reconciliation -----
 
 
-class _FakeAdapter:
+class _FakeAdapter(ArrOptimizer):
     app = "radarr"
 
     def __init__(self, file_ids):
@@ -87,56 +164,46 @@ class _FakeAdapter:
         return item["id"]
 
 
-def _worker(tmp_path, state):
-    cfg = type("C", (), {})()
-    # Minimal config object good enough for reconciliation
-    from optimizarr.config import OptimizerConfig
-
-    cfg.optimizer = OptimizerConfig(enabled=True, apps=[])
-    cfg.dry_run = False
-    cfg.radarr = None
-    cfg.sonarr = None
+def _worker(state):
     w = OptimizerWorker.__new__(OptimizerWorker)
-    w.opt = cfg.optimizer
+    w.opt = OptimizerConfig(enabled=True, apps=[])
     w.state = state
     return w
+
+
+def _ctx(file_ids):
+    ctx = _AppContext(_FakeAdapter(file_ids))
+    ctx.items_by_id = {1: {"id": 1}}
+    return ctx
 
 
 def test_reconcile_grab_succeeded(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
     state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(tmp_path, state)
+    w = _worker(state)
 
-    ctx = type("Ctx", (), {})()
-    ctx.adapter = _FakeAdapter({1: 200})  # file id changed -> success
-    ctx.items_by_id = {1: {"id": 1}}
-
-    w._reconcile_in_flight(ctx, queue_ids=set())  # left the queue
-    assert state.get("radarr", 1).status == SATISFIED
-    assert state.get("radarr", 1).file_id == 200
+    w._reconcile_in_flight(_ctx({1: 200}), queue_ids=set())  # file id changed -> success
+    entry = state.get("radarr", 1)
+    assert entry is not None
+    assert entry.status == SATISFIED
+    assert entry.file_id == 200
 
 
 def test_reconcile_grab_failed(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
     state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(tmp_path, state)
+    w = _worker(state)
 
-    ctx = type("Ctx", (), {})()
-    ctx.adapter = _FakeAdapter({1: 100})  # file id unchanged -> failed
-    ctx.items_by_id = {1: {"id": 1}}
-
-    w._reconcile_in_flight(ctx, queue_ids=set())
+    w._reconcile_in_flight(_ctx({1: 100}), queue_ids=set())  # file id unchanged -> failed
     assert state.get("radarr", 1) is None  # cleared, will retry
 
 
 def test_reconcile_still_in_queue_untouched(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
     state.mark_in_flight("radarr", 1, guid="g", file_id_at_grab=100)
-    w = _worker(tmp_path, state)
+    w = _worker(state)
 
-    ctx = type("Ctx", (), {})()
-    ctx.adapter = _FakeAdapter({1: 100})
-    ctx.items_by_id = {1: {"id": 1}}
-
-    w._reconcile_in_flight(ctx, queue_ids={1})  # still downloading
-    assert state.get("radarr", 1).status == IN_FLIGHT
+    w._reconcile_in_flight(_ctx({1: 100}), queue_ids={1})  # still downloading
+    entry = state.get("radarr", 1)
+    assert entry is not None
+    assert entry.status == IN_FLIGHT
