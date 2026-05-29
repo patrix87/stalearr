@@ -79,9 +79,9 @@ If neither Radarr nor Sonarr is configured, the container exits 1.
 
 All behavior lives in `config.toml`. The full set of keys — `dry_run`, the `[unmonitor]`
 schedule/per-app options, the `[optimizer]` worker settings, the per-app `min_age_days`
-release-age gate, and the `[optimizer.topsis]` tuning (weights, size envelopes, score
-floor, swap gates — all per-profile) — is documented inline in
-[`config.example.toml`](config.example.toml). Copy it to `config.toml` and edit.
+release-age gate, and the `[optimizer.topsis]` tuning (per-profile weights and size
+envelopes, the score floor, and the `min_closeness_gain` swap threshold) — is documented
+inline in [`config.example.toml`](config.example.toml). Copy it to `config.toml` and edit.
 
 The TOPSIS defaults match the tuning validated during development; you should only need to
 touch them to add new profile names or adjust targets.

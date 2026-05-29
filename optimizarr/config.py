@@ -41,9 +41,6 @@ class Connection:
     api_key: str
 
 
-# ===== Feature configs live in optimizarr.features.<feature>.config =====
-
-
 @dataclass
 class Config:
     dry_run: bool

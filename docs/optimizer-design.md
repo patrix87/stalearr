@@ -96,7 +96,7 @@ flowchart TD
 - One **queue fetch per iteration** serves both the pace gate (`queue_max`) and the
   "is this item already downloading?" skip — so there is **no in-flight state** to track,
   and a restart needs no reconciliation.
-- `process_interval_seconds` (default 10) is a **settle delay**: after a
+- `process_interval_seconds` (default 15, minimum 10) is a **settle delay**: after a
   `POST /api/v3/release`, Radarr needs a moment to register the release in the queue.
   Reading too soon would make the next `queue_max` check miss the just-grabbed item.
 - A grab **records nothing**. Each picked item is remembered for the current **pass** so

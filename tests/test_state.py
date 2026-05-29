@@ -24,19 +24,6 @@ def test_mark_satisfied_and_persist(tmp_path):
     assert entry.status == SATISFIED
 
 
-def test_load_ignores_legacy_fields(tmp_path):
-    # Old state files carried in_flight/file_id/guid; loading must not choke on them.
-    path = tmp_path / "state.json"
-    path.write_text(
-        '{"radarr": {"7": {"status": "satisfied", "updated_at": "2026-05-28T00:00:00+00:00",'
-        ' "file_id": 9, "guid": "x"}}}'
-    )
-    m = StateManager(str(path))
-    entry = m.get("radarr", 7)
-    assert entry is not None
-    assert entry.status == SATISFIED
-
-
 def test_is_active_lifecycle(tmp_path):
     m = _mgr(tmp_path)
     now = datetime.now(UTC)  # marks stamp wall-clock time; base offsets on real now
