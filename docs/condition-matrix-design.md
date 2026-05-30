@@ -98,57 +98,50 @@ Default starting points (validate on the real library before trusting them — P
 scale means meaningful release-to-release diffs are often tens of thousands of points):
 `score_slack ≈ 0.02`, `score_much ≈ 0.10` on `n_score`; `size_slack ≈ 0.03` relative.
 
-## Size model: monotonic for size-leaners, tent only for quality-leaners
+## Size model: one shared reference, profiles expressed relative to it
 
-The original tent `{floor, target, bloat}` penalizes files *below* target (n_size rises from
-floor up to target). But "too small is bad" is actually two separate claims, and only one of
-them belongs in the size curve:
+This is a **space-saving tool** — nothing should ever push a file *bigger* except a genuine
+score/resolution gain (and the [gate](#universal-forbidden-transitions-every-profile) already
+governs those). So the size model is split into two layers:
 
-1. **"Too small = probably a fake/garbage encode."** Already handled by the **gb/h floor
-   prefilter**. Once a release clears the floor this concern is fully spent.
-2. **"Too small = below the bitrate I actually want."** Only true for **Remux/Quality**, where
-   bitrate is genuinely part of the quality bar.
+**1. A single objective reference per resolution** — `{floor, target, ceiling}` in GiB/h,
+shared by *all* profiles. This is reality, not taste:
 
-So the curve shape is **per profile intent**:
+- `floor`  — below this the encode is fake / too soft for the resolution → hard pre-filter drop.
+- `target` — a **realistic GiB/h for a good (HDR) release** at this resolution. The honest
+  "this is what a solid encode actually weighs" number.
+- `ceiling` — above this is bloat: no real quality benefit, only wasted space.
 
-| Profile | Size curve | `ideal_gbh` (peak) | Pick |
-| --- | --- | --- | --- |
-| Remux | **tent** | in remux territory | `max_score` (size = tie-break only) |
-| Quality | **tent** | a touch below Remux | `topsis`, heavy score weight, *small* size weight |
-| Balanced | **monotonic** (smaller wins above floor) | = floor | `topsis`, score-leaning weights |
-| Efficient | **monotonic** | = floor | `topsis`, size-leaning weights |
-| Compact | **monotonic** | = floor | `min_size`, gated by `viability_score` |
+**2. A per-profile size *aim*, relative to that target** — each profile says how far below the
+realistic size it wants to sit, as a fraction of `target` (so config is always *relative to the
+ideal*, never a hand-typed absolute):
 
-This is your "ideal gb/h per profile, aim a few % below to different degrees": for tent
-profiles the peak sits at `ideal_gbh`; for monotonic profiles smaller is strictly better and
-the "how aggressively smaller" tilt is the TOPSIS **size weight** (Efficient > Balanced),
-*not* a moved peak. Quality "optimizes size to a much lower degree than Efficient" via a small
-size weight on top of its tent.
+| Profile | `size_aim` | meaning | score weight | size weight |
+| --- | --- | --- | --- | --- |
+| Remux | — (size ignored) | bitrate is the point; take the best score | very high | ~0 |
+| Quality | `1.0` | at the realistic target | high | small |
+| Balanced | `0.8` | slightly smaller | medium | medium |
+| Efficient | `0.65` | much smaller | medium | high |
+| Compact | `0.5` (→ toward floor) | as small as still viable | low | very high |
 
-Quality therefore moves from the first draft's `pick = max_score` to **`pick = topsis`** (so
-its small size preference actually acts). Only Remux stays `max_score`.
+**The size-desirability curve is one-sided** (this is what protects your disk): `n_size = 1.0`
+for anything **at or below the aim**, then ramps down to `0` at `ceiling`. *Smaller than the aim
+is never penalized.* Consequences:
 
-## When is a bigger file ever right? (the much-smaller-current-file case)
+- A tiny, good-scoring current file is already `n_size = 1.0`, so **nothing ever inflates it**
+  to climb toward a target. The much-smaller-current-file problem disappears by construction —
+  for every profile, not just some.
+- Among candidates at-or-below the aim, size ties at 1.0 and **score breaks the tie** → "small
+  enough, then best score", which is exactly "good score *and* smaller".
+- "slightly vs much smaller" is purely **where the aim sits** (`0.8` vs `0.65`); "how hard size
+  competes with score" is the **size weight**. Two independent, legible knobs.
+- Remux sets size weight ≈ 0, so being far above `ceiling` costs it nothing — it just takes the
+  top score. No special-case curve needed.
 
-The hard case: the current file is *much smaller* than the profile's `ideal_gbh` (a superb
-x265 encode — or garbage that happens to score high). With a tent, the current file sits on the
-rising side (n_size < 1), a candidate at target scores n_size = 1, so TOPSIS sees the bigger
-file as "better on size" and may inflate size at equal/lower score. The monotonic split above
-**resolves this structurally**:
-
-- **Efficient / Balanced / Compact** (monotonic): a much-smaller current file is *never* worse
-  on size, so TOPSIS never pushes toward a bigger file to climb a tent. Size increases only
-  happen as a side-effect of a real score/resolution gain the gate already permits.
-- **Remux / Quality** (tent): bumping a tiny file up toward `ideal_gbh` *is* the intended
-  behavior — for these profiles bitrate is part of the quality bar, so "increasing size is
-  good" here. **The curve shape is the answer to "when is a bigger file right".**
-
-The "garbage that scored high but is tiny" worry gets a hard boundary: **the optimizer trusts
-`customFormatScore` and never infers quality from size beyond the fake-floor.** Distinguishing
-"superb tiny encode" from "tiny garbage that scored high" from size alone is unsolvable; if a
-garbage file scores high, that's a Profilarr scoring bug to fix at the source — not something
-to paper over by inflating size (which would re-introduce exactly the unwanted size increases
-this redesign removes). Size is a *cost*, never a quality proxy except via the floor.
+The fake-floor is the *only* place size is allowed to veto a release; everywhere else **size is
+a cost, never a quality proxy**. The optimizer trusts `customFormatScore` for quality — a tiny
+file that scores high is kept; if it's actually garbage, that's a Profilarr scoring bug to fix
+at the source, not something to paper over by demanding bigger files.
 
 ## Universal forbidden transitions (every profile)
 
@@ -176,9 +169,9 @@ pick step orders what remains.
 Quality/Balanced/Efficient are the genuine multi-axis cases → TOPSIS picks among the legal
 survivors (Quality with a heavy score weight, Balanced score-leaning, Efficient size-leaning).
 Remux (`max_score`) and Compact (`min_size`) are effectively single-axis once the gate has run
-→ a deterministic sort is clearer and oscillation-proof. See
-[Size model](#size-model-monotonic-for-size-leaners-tent-only-for-quality-leaners) for which
-profiles use a tent vs a monotonic size curve.
+→ a deterministic sort is clearer and oscillation-proof. All profiles share one size
+[reference](#size-model-one-shared-reference-profiles-expressed-relative-to-it) and differ only
+by their relative `size_aim` + weights — "at target" above means each profile's own aim point.
 
 ## Per-profile condition matrices
 
@@ -276,18 +269,30 @@ improvement; the partial-order argument replaces it with a structural guarantee.
 
 ## Config shape (proposed)
 
-The matrix is parameterized, not enumerated. Per profile (preset), add a `[…transitions]`
-block alongside the existing weights/size curve:
+Two layers, both relative to one objective reference (see
+[Size model](#size-model-one-shared-reference-profiles-expressed-relative-to-it) and the
+[reference ladder](#size-reference-ladder-proposed-new-defaults)).
+
+**Shared reference — defined once, not per profile:**
+
+```toml
+[optimizer.topsis.reference]
+# Realistic GiB/h per resolution (HDR-assumed). All profiles read these.
+"2160" = { floor = 3.0, target = 6.5, ceiling = 18 }
+"1080" = { floor = 1.0, target = 2.5, ceiling = 8 }
+"720"  = { floor = 0.4, target = 1.0, ceiling = 4 }
+"480"  = { floor = 0.2, target = 0.5, ceiling = 3 }   # SDR
+```
+
+**Per-profile — weights + a *relative* size aim + transition params:**
 
 ```toml
 [optimizer.topsis.presets.Efficient]
-score = 0.55          # TOPSIS pick-step weights (multi-axis profiles)
+score = 0.45                  # TOPSIS pick-step weights
 resolution = 0.10
-size = 0.35
-size_curve = "monotonic"      # "tent" (Remux/Quality) | "monotonic" (Balanced/Efficient/Compact)
-size_by_resolution = { ... }  # {floor, target, bloat}: floor feeds the gb/h prefilter always;
-                              # target = ideal_gbh = tent peak (tent only); monotonic ignores
-                              # target and just falls from floor->bloat (smaller wins).
+size = 0.45
+size_aim = 0.65               # fraction of reference target: 1.0 = at target, <1 = smaller.
+                              # n_size = 1.0 at/below aim, ramps to 0 at ceiling (one-sided).
 
 [optimizer.topsis.presets.Efficient.transitions]
 score_slack = 0.02            # |Δn_score| within this = "same" (noise band)
@@ -298,19 +303,20 @@ viability_score = 0           # Compact/Quality floor for accepting score drops
 pick = "topsis"               # "topsis" | "max_score" | "min_size"
 ```
 
-Pick + curve by shipped preset:
+Per shipped preset:
 
-| Preset | `size_curve` | `pick` |
-| --- | --- | --- |
-| Remux | tent | `max_score` |
-| Quality | tent | `topsis` (heavy score weight, small size weight) |
-| Balanced | monotonic | `topsis` |
-| Efficient | monotonic | `topsis` |
-| Compact | monotonic | `min_size` (gated by `viability_score`) |
+| Preset | `size_aim` | `pick` | size weight |
+| --- | --- | --- | --- |
+| Remux | n/a (size ignored) | `max_score` | ~0 |
+| Quality | `1.0` | `topsis` | small |
+| Balanced | `0.8` | `topsis` | medium |
+| Efficient | `0.65` | `topsis` | high |
+| Compact | `0.5` | `min_size` (gated by `viability_score`) | very high |
 
-This keeps **one config surface**: presets gain `size_curve` + a `transitions` sub-table; the
-existing `size_by_resolution` still supplies the gb/h floor (and the tent peak where used).
-Per-profile-name overrides inherit the same fields.
+This keeps **one config surface and one set of size numbers**: the reference is defined once;
+each preset only carries a relative `size_aim` + weights + its `transitions` sub-table. Changing
+"what a good 1080p file weighs" is a single edit in `[reference]`, not five preset edits.
+Per-profile-name overrides may also set `size_aim` / weights; they inherit the shared reference.
 
 ## Code plan
 
@@ -320,19 +326,21 @@ Per-profile-name overrides inherit the same fields.
      + per-profile params. This is the single source the doc tables are generated from.
    - A `matrix(transition_cfg)` helper that renders the ACCEPT/❌ table (used by a tools/
      script to regenerate this doc and by tests to assert doc==code).
-2. **Config** (`config.py`): parse `presets.<n>.size_curve` + `presets.<n>.transitions`,
-   default sensible values per shipped preset in `defaults.toml`, validate
-   `score_much > score_slack`, `size_curve` ∈ {tent, monotonic}, and `pick` ∈
-   {topsis, max_score, min_size}.
+2. **Config** (`config.py`): parse the shared `[optimizer.topsis.reference]` table
+   (`{floor, target, ceiling}` per resolution) and per-preset `size_aim` + `transitions`;
+   default sensible values in `defaults.toml`; validate `floor < target ≤ ceiling`,
+   `0 < size_aim ≤ 1`, `score_much > score_slack`, and `pick` ∈ {topsis, max_score, min_size}.
+   Drop the old per-preset `size_by_resolution`.
 3. **Decision** (`decision.py`): insert the transition gate between prefilters and the pick;
    replace the `min_closeness_gain` swap test with: *gate the candidates, then pick by the
    profile's `pick` method; ACT if a survivor exists, else HOLD (satisfied)*. Resolution
    fallback: run the gate on at-target candidates first, fall back to off-target only if empty.
-4. **Topsis** (`topsis.py`): make `normalize_size` honor `size_curve` — `tent` is today's
-   behavior; `monotonic` ignores `target` and falls from floor→bloat (already what
-   `target == floor` does, just made explicit and the default for size-leaners). Keep
-   `rank`/`closeness` for `pick = "topsis"`; add `max_score` / `min_size` deterministic pickers
-   (stable tie-breaks so ranking is reproducible — important for oscillation).
+4. **Topsis** (`topsis.py`): replace the tent in `normalize_size` with the **one-sided curve**
+   — `n_size = 1.0` for `gbh ≤ aim` (where `aim = size_aim × reference.target[res]`), then
+   linear ramp to `0` at `reference.ceiling[res]`; the `reference.floor[res]` stays a hard
+   pre-filter drop. Resolution and score normalization unchanged. Keep `rank`/`closeness` for
+   `pick = "topsis"`; add `max_score` / `min_size` deterministic pickers (stable tie-breaks so
+   ranking is reproducible — important for oscillation).
 5. **State**: unchanged (satisfied/HOLD model still applies — HOLD now means "no legal,
    improving transition exists").
 6. **Tests**:
@@ -349,11 +357,11 @@ Per-profile-name overrides inherit the same fields.
 
 ## Validation of current weights and limits
 
-Before trusting the redesign, **re-validate the numbers we already ship** — the preset weights,
-the per-resolution `size_by_resolution` floors/targets/bloats, `score_gap`, and the new
-`score_slack` / `score_much` / `size_slack` thresholds. The point is to confirm the values we
-*have* still produce the right picks once the gate + monotonic curves change the behavior around
-them (a floor/target tuned against the old tent-everywhere model may be wrong under the new one).
+Before trusting the redesign, **re-validate every number** — the preset weights, the shared
+`[reference]` `{floor, target, ceiling}`, each preset's `size_aim`, `score_gap`, and the new
+`score_slack` / `score_much` / `size_slack` thresholds. The point is to confirm they produce the
+right picks under the new gate + one-sided size curve (a floor/target tuned against the old
+tent-everywhere model may be wrong now).
 
 Use and extend the existing harness — `tools/weight_lab.py` already drives the real engine and
 shipped presets, prints each candidate's closeness per preset (★ winner / "drop" = floored or
@@ -367,18 +375,20 @@ gap-cut), and writes a timestamped report to `reports/`. Extend it to:
   - smaller file, *much* lower score → ❌; smaller file, *slightly* lower score → ✅ for
     size-leaners, ❌ for Remux;
   - lower score, bigger file, same resolution → ❌;
-  - **much-smaller, lower-score current file**: confirm Efficient/Balanced/Compact do *not*
-    inflate size, and Remux/Quality *do* move up toward `ideal_gbh`.
+  - **much-smaller, lower-score current file**: confirm *no* profile inflates size — a file
+    already at/below its aim is `n_size = 1.0` and is never swapped for a bigger one; Remux just
+    holds unless a higher-scoring release exists.
 - Assert the **no-oscillation property** on the real presets: for random A/B pairs there is no
   profile where both A→B and B→A are accepted (this also checks `score_much > score_slack`
   holds with the shipped numbers).
-- Sweep each threshold (`score_slack`, `score_much`, `size_slack`, the floors/targets) across a
-  small range and record where picks flip, so the shipped defaults are chosen from data, not
-  guessed. Land the chosen values in `defaults.toml` and the rationale in the `reports/` file.
+- Sweep each knob (`score_slack`, `score_much`, `size_slack`, the reference `floor/target/
+  ceiling`, each `size_aim`) across a small range and record where picks flip, so the shipped
+  defaults are chosen from data, not guessed. Land the values in `defaults.toml`, rationale in
+  `reports/`.
 
 Where possible, validate against a **real Radarr/Sonarr release pool** (a `dry_run = true` run,
-or captured `GET /api/v3/release` payloads) rather than only synthetic scenarios, so the floors
-and bloats are checked against real-world bitrates.
+or captured `GET /api/v3/release` payloads) rather than only synthetic scenarios, so the
+reference floor/target/ceiling are checked against real-world bitrates.
 
 ### Real-world bitrate reference (sanity-check the size curves)
 
@@ -398,15 +408,16 @@ shipped `size_by_resolution` targets:
 | Compact | any | smallest above the fake floor | — | = floor | by design. |
 | — | 720 | typical encode 1–2 Mbps | ~0.45–0.9 | Eff 0.8 / Bal 1.2 | OK. |
 
-Takeaways to fold into the validation sweep:
+The table above is the *old* per-preset `size_by_resolution` (kept for context). It's replaced
+by a **single shared reference** with profiles aiming relative to it — see
+[Size reference ladder](#size-reference-ladder-proposed-new-defaults). Takeaways folded in:
 
-- The shipped **2160p Efficient target (4 GiB/h ≈ 9.4 Mbps)** sat at/under the low end of real
-  "good" 4K HEVC — corrected in the HDR-baked ladder below (target 7 GiB/h ≈ 17 Mbps).
-- **HDR is now assumed everywhere** (this user watches HDR almost exclusively) — the ladder
-  below bakes a ~25% HDR premium into every target/floor instead of treating HDR as a separate
-  case. See [HDR-baked target ladder](#hdr-baked-target-ladder-proposed-new-defaults).
-- Remux floors/targets and the 1080p encode tiers are **well-supported by the data** — no change
-  indicated beyond what the sweep confirms.
+- **Don't inflate.** This is a space-saving tool, so the reference `target` is anchored to a
+  *lean good HDR encode*, not a generous one, and no profile ever aims above it. The reference
+  is the only set of absolute numbers; profiles pull downward from it.
+- HDR is assumed, but it is **not** applied as a premium *on top of* generous SDR figures (that
+  was the mistake — it pushed everything up). The reference targets are chosen directly as
+  realistic lean HDR-content sizes and stay near the ~6 GiB/h-for-4K intuition.
 
 Sources: [UHD/4K remux bitrates (Hacker News)](https://news.ycombinator.com/item?id=39337834),
 [1080p Blu-ray/remux bitrates (Linus Tech Tips)](https://linustechtips.com/topic/1059408-dvdbluray-resolutions-and-bitrates/),
@@ -415,68 +426,57 @@ Sources: [UHD/4K remux bitrates (Hacker News)](https://news.ycombinator.com/item
 [4K HDR x265 encoding settings (Code Calamity)](https://codecalamity.com/encoding-settings-for-hdr-4k-videos-using-10-bit-x265/),
 [1080p HDR vs SDR bitrate premium (arstech)](https://arstech.net/video-encoding-bitrates-for-4k-and-1080p-with-h-264-and-h-265/).
 
-### HDR-baked target ladder (proposed new defaults)
+### Size reference ladder (proposed new defaults)
 
-**Assumption: every release is HDR (HDR10/10-bit).** This library is watched almost entirely in
-HDR, so rather than carry a separate SDR/HDR curve, the targets below bake in a **~25% HDR
-premium** (HDR10's 10-bit depth needs ~20–30% more bitrate than SDR for the same quality; for
-4K that also lines up with the commonly cited "+1–5 Mbps for HDR"). An SDR release will simply
-read ~20% "lighter" than its tier and rank as smaller — harmless for the size-leaning profiles,
-and for the Remux/Quality tents it lands just left of the peak (acceptable). 480p stays SDR
-(HDR at 480p is not a thing).
+**One objective reference per resolution, shared by all profiles.** HDR-assumed, but anchored
+to a *lean good HDR encode* — these numbers are deliberately modest because the whole point is
+to reclaim disk, and every profile only ever aims **at or below** these. Unit GiB/h
+(`GB = 1024³`); `1 Mbps ≈ 0.42 GiB/h`, Mbps shown for reference only.
 
-Unit is GiB/h (`GB = 1024³`); `1 Mbps ≈ 0.42 GiB/h`. Mbps shown for reference only.
-
-| Preset | Res | floor | target | bloat | target in Mbps (HDR) |
+| Res | floor | target | ceiling | target Mbps | what `target` represents |
 | --- | --- | --- | --- | --- | --- |
-| **Remux** | 2160 | 15 | 24 | 60 | ~57 |
-| | 1080 | 7 | 10 | 25 | ~24 |
-| | 720 | 2.5 | 4 | 18 | ~9.5 |
-| **Quality** | 2160 | 9 | 13 | 30 | ~31 |
-| | 1080 | 3.5 | 5 | 14 | ~12 |
-| | 720 | 1.0 | 2.2 | 10 | ~5.2 |
-| **Efficient** | 2160 | 5 | 7 | 18 | ~17 |
-| | 1080 | 2.0 | 3 | 10 | ~7.2 |
-| | 720 | 0.5 | 1.0 | 5 | ~2.4 |
-| **Balanced** | 2160 | 4 | 5.5 | 22 | ~13 |
-| | 1080 | 1.6 | 2.4 | 13 | ~5.7 |
-| | 720 | 0.45 | 0.8 | 7 | ~1.9 |
-| **Compact** | 2160 | 3.5 | 3.5 | 14 | ~8.3 |
-| | 1080 | 1.3 | 1.3 | 6 | ~3.1 |
-| | 720 | 0.4 | 0.4 | 4 | ~1.0 |
+| 2160 | 3.0 | 6.5 | 18 | ~15.5 | a good, lean 4K HDR x265 encode |
+| 1080 | 1.0 | 2.5 | 8 | ~6 | a good 1080p HDR encode |
+| 720 | 0.4 | 1.0 | 4 | ~2.4 | a good 720p encode |
+| 480 | 0.2 | 0.5 | 3 | ~1.2 | SD (SDR; HDR n/a) |
 
-Notes:
+Then each profile aims relative to `target` (`aim = size_aim × target`), with `n_size = 1.0`
+at-or-below `aim` and ramping to 0 at `ceiling`. Worked aim points:
 
-- **Floors are ordered** so each profile only sees its own tier of release:
-  Compact < Balanced < Efficient < Quality < Remux at every resolution. A Quality-grade 4K HDR
-  encode (~13 GiB/h) falls *below* the Remux floor (15), so it can't masquerade as a remux.
-- For the **monotonic** presets (Efficient/Balanced/Compact) `target` is informational — the
-  curve falls from floor→bloat and smaller always wins; the meaningful knob there is the
-  **floor** (fake/too-soft cut) and the TOPSIS size weight. `target` matters as the tent peak
-  only for **Remux/Quality**.
-- 2160 anchors: Remux target ~57 Mbps (lean end of 60–100 Mbps UHD HDR remux); Quality ~31 Mbps
-  (near-transparent 4K HDR encode); Efficient ~17 Mbps (good 10-bit x265); Compact floor
-  ~8 Mbps (lowest 4K HDR that still holds up before banding).
-- These are the **sweep's starting points**, not frozen — the validation step confirms/curves
-  them against a real HDR release pool, then they land in `defaults.toml`.
+| Profile | `size_aim` | aim @2160 | aim @1080 | intent |
+| --- | --- | --- | --- | --- |
+| Quality | 1.0 | 6.5 | 2.5 | at the realistic target |
+| Balanced | 0.8 | 5.2 | 2.0 | slightly smaller |
+| Efficient | 0.65 | 4.2 | 1.6 | much smaller |
+| Compact | 0.5 | 3.25 | 1.25 | toward the floor / smallest viable |
+| Remux | — | — | — | ignores size (weight ~0), takes top score |
 
-Ready-to-paste `size_by_resolution` (480p kept SDR from current defaults):
+Why this is safe for disk and sensible:
+
+- Nothing aims above `target`; the gate forbids bigger-at-no-gain; the curve never rewards
+  *bigger*. So size only ever increases as a side effect of a real score/resolution upgrade.
+- A current file already at/below a profile's aim scores `n_size = 1.0` → it is **never**
+  swapped for a bigger one to "reach" a target. The much-smaller-file problem is gone for all
+  profiles.
+- Efficient @2160 aim ≈ 4.2 GiB/h (~10 Mbps) and Compact ≈ 3.25 (~8 Mbps) — close to the old
+  shipped Efficient target (4) the user was comfortable with, *not* the inflated ~7 from the
+  previous draft.
+- `floor` (3.0 @2160 ≈ 7 Mbps) is the shared fake/too-soft cut; below it 4K HDR visibly bands.
+
+These are the **sweep's starting points** — confirmed against a real HDR release pool, then
+landed in `defaults.toml`.
+
+Ready-to-paste:
 
 ```toml
-[optimizer.topsis.presets.Remux]
-size_by_resolution = { "480" = { floor = 0.4, target = 1.5, bloat = 10 }, "720" = { floor = 2.5, target = 4.0, bloat = 18 }, "1080" = { floor = 7.0, target = 10.0, bloat = 25 }, "2160" = { floor = 15.0, target = 24.0, bloat = 60 } }
+[optimizer.topsis.reference]
+"2160" = { floor = 3.0, target = 6.5, ceiling = 18 }
+"1080" = { floor = 1.0, target = 2.5, ceiling = 8 }
+"720"  = { floor = 0.4, target = 1.0, ceiling = 4 }
+"480"  = { floor = 0.2, target = 0.5, ceiling = 3 }
 
-[optimizer.topsis.presets.Quality]
-size_by_resolution = { "480" = { floor = 0.2, target = 0.8, bloat = 6 }, "720" = { floor = 1.0, target = 2.2, bloat = 10 }, "1080" = { floor = 3.5, target = 5.0, bloat = 14 }, "2160" = { floor = 9.0, target = 13.0, bloat = 30 } }
-
-[optimizer.topsis.presets.Efficient]
-size_by_resolution = { "480" = { floor = 0.2, target = 0.35, bloat = 3 }, "720" = { floor = 0.5, target = 1.0, bloat = 5 }, "1080" = { floor = 2.0, target = 3.0, bloat = 10 }, "2160" = { floor = 5.0, target = 7.0, bloat = 18 } }
-
-[optimizer.topsis.presets.Balanced]
-size_by_resolution = { "480" = { floor = 0.2, target = 0.5, bloat = 4 }, "720" = { floor = 0.45, target = 0.8, bloat = 7 }, "1080" = { floor = 1.6, target = 2.4, bloat = 13 }, "2160" = { floor = 4.0, target = 5.5, bloat = 22 } }
-
-[optimizer.topsis.presets.Compact]
-size_by_resolution = { "480" = { floor = 0.2, target = 0.2, bloat = 2 }, "720" = { floor = 0.4, target = 0.4, bloat = 4 }, "1080" = { floor = 1.3, target = 1.3, bloat = 6 }, "2160" = { floor = 3.5, target = 3.5, bloat = 14 } }
+# per preset (weights elsewhere): size_aim only
+# Remux: size_aim unused (size weight ~0); Quality 1.0; Balanced 0.8; Efficient 0.65; Compact 0.5
 ```
 
 ## Resolved (this round)
@@ -484,12 +484,15 @@ size_by_resolution = { "480" = { floor = 0.2, target = 0.2, bloat = 2 }, "720" =
 - **slight/much measured on `Δn_score`** (fixed `[anti_ideal, ideal]` normalized scale), per
   axis — *not* on combined closeness, and *not* field-relative. Field-relativity stays in
   gap-cut. This is what preserves the no-oscillation invariant.
-- **Size curve is per-profile shape:** tent for Remux/Quality (bitrate is a quality bar),
-  monotonic-smaller-wins for Balanced/Efficient/Compact (the gb/h floor already catches fakes).
-- **Quality → `pick = "topsis"`** with a heavy score weight + small size weight (not
-  `max_score`), so it optimizes size *to a lower degree than Efficient*.
-- **Bigger files only for Remux/Quality**, via their tent — answers "when is increasing size
-  good". The optimizer never infers quality from size beyond the floor; it trusts the score.
+- **One shared size reference** `{floor, target, ceiling}` per resolution; profiles aim
+  *relative* to it via `size_aim` (fraction of target). Config is always relative to the ideal,
+  and the reference numbers are deliberately lean (space-saving tool).
+- **One-sided size curve:** `n_size = 1.0` at/below the aim, ramping to 0 at ceiling. Smaller is
+  never penalized → nothing ever inflates a file; the much-smaller-current-file problem is gone
+  for every profile, not just some.
+- **Bigger files only ever happen as a side effect of a real score/resolution gain** (gated).
+  No profile targets a bigger file; the optimizer never infers quality from size beyond the
+  fake-floor — it trusts the score.
 
 ## Open questions still to settle during implementation
 
