@@ -380,6 +380,41 @@ Where possible, validate against a **real Radarr/Sonarr release pool** (a `dry_r
 or captured `GET /api/v3/release` payloads) rather than only synthetic scenarios, so the floors
 and bloats are checked against real-world bitrates.
 
+### Real-world bitrate reference (sanity-check the size curves)
+
+The size curve unit is GB/h where the code's `GB = 1024³`, i.e. **GiB/h**. Conversion:
+**1 Mbps ≈ 0.42 GiB/h** (`Mbps × 3600 / 8 / 1024`). Published bitrate ranges, converted, vs the
+shipped `size_by_resolution` targets:
+
+| Tier | Res | Typical bitrate | ≈ GiB/h | Shipped target | Read |
+| --- | --- | --- | --- | --- | --- |
+| Remux | 2160 | 60–100 Mbps (UHD BD remux; 50–80 GiB/movie) | ~25–42 | 20 (floor 12, bloat 100) | target sits *below* the real low end — deliberate "leanest remux wins"; floor 12 (~28 Mbps) safely under real remuxes. OK. |
+| Remux | 1080 | 20–40 Mbps avg ~25–30 (25–30 GiB/movie) | ~8–17 | 10 (floor 6, bloat 40) | target right at the real low edge; floor 6 (~14 Mbps) cleanly separates remux from encodes (2–6 Mbps). OK. |
+| Quality | 2160 | high-bitrate HEVC encode ~15–25 Mbps | ~6–10 | 10 (floor 4) | target at the top of the encode band — matches "full BluRay-grade encode". OK. |
+| Quality | 1080 | ~6–10 Mbps | ~2.5–4 | 4 (floor 2) | OK. |
+| Efficient | 2160 | good x265 10–18 Mbps (HDR +10–20%) | ~4.2–7.5 | 4 (floor 1.5, bloat 16) | **target ≈ low edge / slightly below** the "good 4K HEVC" band → may over-reward sub-spec encodes. Check real 4K encodes aren't pushed too small; consider target ~5–6. |
+| Efficient | 1080 | good x265 2–6 Mbps | ~1–2.7 | 2 (floor 0.8) | lands in the sweet spot. OK. |
+| Balanced | 1080/2160 | between Efficient and Compact | — | 2.5 / 5.0 | plausible; validate via sweep. |
+| Compact | any | smallest above the fake floor | — | = floor | by design. |
+| — | 720 | typical encode 1–2 Mbps | ~0.45–0.9 | Eff 0.8 / Bal 1.2 | OK. |
+
+Takeaways to fold into the validation sweep:
+
+- The **2160p Efficient target (4 GiB/h ≈ 9.4 Mbps)** is the main suspect — it's at/under the
+  low end of real "good" 4K HEVC; with the new *monotonic* curve (smaller always wins) this is
+  less harmful than under a tent, but confirm it doesn't make Efficient grab visibly-soft 4K
+  encodes. Candidate bump: target ~5–6.
+- **HDR runs ~10–20% higher bitrate** at the same quality; the curves don't distinguish HDR, so
+  HDR 4K encodes sit higher on the cost curve. Note as a known limitation; a per-HDR curve is
+  out of scope for now.
+- Remux floors/targets and the 1080p encode tiers are **well-supported by the data** — no change
+  indicated beyond what the sweep confirms.
+
+Sources: [UHD/4K remux bitrates (Hacker News)](https://news.ycombinator.com/item?id=39337834),
+[1080p Blu-ray/remux bitrates (Linus Tech Tips)](https://linustechtips.com/topic/1059408-dvdbluray-resolutions-and-bitrates/),
+[x265 4K & 1080p encoding bitrates (arstech)](https://arstech.net/video-encoding-bitrates-for-4k-and-1080p-with-h-264-and-h-265/),
+[HEVC bitrate guidance (Plex forum)](https://forums.plex.tv/t/is-there-a-standard-bitrate-that-is-recommended-for-hevc-h265-in-720p-1080p-and-4k/203849).
+
 ## Resolved (this round)
 
 - **slight/much measured on `Δn_score`** (fixed `[anti_ideal, ideal]` normalized scale), per
