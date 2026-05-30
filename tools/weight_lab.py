@@ -77,7 +77,7 @@ SCENARIOS: list[Scenario] = [
             _release("2160p remux huge", 980_000, 2160, 60.0),  # 30 GiB/h, slightly higher
         ],
         note="The current file is already tiny and good. Same-score-but-bigger is forbidden for "
-        "all; only Remux/Quality may take the higher-scoring big remux.",
+        "all; only Remux may take the higher-scoring big remux (every other preset holds).",
     ),
 ]
 

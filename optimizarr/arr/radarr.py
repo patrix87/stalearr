@@ -10,6 +10,17 @@ class RadarrApi(ArrApi):
     def _embedded_file(self, item: dict) -> dict | None:
         return item.get("movieFile")
 
+    def _manual_import_file(self, candidate: dict) -> dict:
+        return {
+            "path": candidate.get("path"),
+            "movieId": (candidate.get("movie") or {}).get("id"),
+            "quality": candidate.get("quality"),
+            "languages": candidate.get("languages"),
+            "releaseGroup": candidate.get("releaseGroup"),
+            "downloadId": candidate.get("downloadId"),
+            "indexerFlags": candidate.get("indexerFlags"),
+        }
+
     def list_items(self) -> list[dict]:
         return self.client.get("/api/v3/movie") or []
 

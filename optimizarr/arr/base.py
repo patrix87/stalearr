@@ -134,11 +134,28 @@ class ArrApi:
         timeout: int | None = None,
         retry: bool = True,
     ) -> None:
-        """POST /api/v3/manualimport with the given candidate items. Same path on both apps."""
-        body = [{**it, "importMode": import_mode} for it in items]
-        self.client.post("/api/v3/manualimport", body, timeout=timeout, retry=retry)
+        """Force-import the given manualimport candidates via the ManualImport command.
+
+        Do NOT POST to /api/v3/manualimport for this: that endpoint only *reprocesses*
+        candidates (re-evaluates rejections) and never imports. The actual import is the
+        ManualImport command, and it needs each file's owning id — movieId for Radarr,
+        seriesId + episodeIds for Sonarr. The GET candidate carries those only as nested
+        `movie`/`series`/`episodes` objects, so each app maps them in `_manual_import_file`.
+        Posting a candidate verbatim sends no top-level id, which *arr reads as 0 and
+        rejects with 'Movie/Series with ID 0 does not exist'."""
+        body = {
+            "name": "ManualImport",
+            "importMode": import_mode,
+            "files": [self._manual_import_file(it) for it in items],
+        }
+        self.client.post("/api/v3/command", body, timeout=timeout, retry=retry)
 
     # ----- app-specific (subclasses implement) -----
+
+    def _manual_import_file(self, candidate: dict) -> dict:
+        """Map a manualimport GET candidate to a ManualImport command `files[]` entry,
+        attaching the app-specific owning id(s) the import requires."""
+        raise NotImplementedError
 
     def _embedded_file(self, item: dict) -> dict | None:
         """The file object carried on the item itself (movieFile / episodeFile)."""

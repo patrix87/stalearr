@@ -83,7 +83,7 @@ def test_decide_act_smaller_at_equal_score():
     smaller = _release(guid="lean", score=900_000, resolution=2160, size_gb=13.0)  # 6.5 GiB/h
     d = decide(_topsis(), [smaller], 2.0, "2160p Efficient", 2160, current_file=current)
     assert d.action == "ACT"
-    assert d.release["guid"] == "lean"
+    assert d.release is not None and d.release["guid"] == "lean"
 
 
 def test_decide_hold_on_bigger_file_without_score_gain():
@@ -111,7 +111,7 @@ def test_decide_compact_picks_smallest_legal():
     b = _release(guid="b", score=880_000, resolution=2160, size_gb=8.0)  # 4 GiB/h, slightly lower
     d = decide(_topsis(), [a, b], 2.0, "Compact", 2160, current_file=current)
     assert d.action == "ACT"
-    assert d.release["guid"] == "b"  # min_size among legal survivors
+    assert d.release is not None and d.release["guid"] == "b"  # min_size among legal survivors
 
 
 def test_decide_drops_bigger_releases_when_size_increase_disallowed():

@@ -1,5 +1,6 @@
 from optimizarr.arr import RadarrApi, SonarrApi, build_client, max_allowed_resolution
 from optimizarr.config import Connection
+from optimizarr.http import ArrClient
 
 
 def test_max_allowed_resolution_nested():
@@ -69,3 +70,70 @@ def test_sonarr_accessors_use_embedded_episode_file():
 def test_sonarr_current_file_id_fallback():
     api = SonarrApi(_conn("sonarr"))
     assert api.current_file_id({"episodeFileId": 11}) == 11  # no episodeFile, fallback field
+
+
+class _RecordingClient(ArrClient):
+    """Captures the single POST a manual_import makes."""
+
+    def __init__(self):
+        self.posts: list[tuple] = []
+
+    def post(self, path, body, *, timeout=None, retry=True):
+        self.posts.append((path, body, timeout, retry))
+        return None
+
+
+def test_radarr_manual_import_posts_command_with_movie_id():
+    api = RadarrApi(_conn())
+    client = _RecordingClient()
+    api.client = client
+    candidate = {
+        "id": 607648377,
+        "path": "/downloads/Bambi.2.mkv",
+        "movie": {"id": 76, "title": "Bambi II"},
+        "quality": {"quality": {"name": "Bluray-1080p"}},
+        "languages": [{"id": 1, "name": "English"}],
+        "releaseGroup": "RSG",
+        "downloadId": "abc123",
+        "indexerFlags": 0,
+        "rejections": [{"reason": "Not a Custom Format upgrade for existing movie file(s)."}],
+    }
+    api.manual_import([candidate], import_mode="auto", timeout=300, retry=False)
+
+    (path, body, timeout, retry) = client.posts[0]
+    # Must hit the command endpoint (the bare /manualimport POST only reprocesses).
+    assert path == "/api/v3/command"
+    assert (timeout, retry) == (300, False)
+    assert body["name"] == "ManualImport"
+    assert body["importMode"] == "auto"
+    file = body["files"][0]
+    # The owning movieId must be lifted out of the nested `movie` object — sending the
+    # candidate verbatim is what made Radarr reject it with "Movie with ID 0".
+    assert file["movieId"] == 76
+    assert file["path"] == "/downloads/Bambi.2.mkv"
+    assert file["releaseGroup"] == "RSG"
+    assert file["downloadId"] == "abc123"
+
+
+def test_sonarr_manual_import_posts_command_with_series_and_episode_ids():
+    api = SonarrApi(_conn("sonarr"))
+    client = _RecordingClient()
+    api.client = client
+    candidate = {
+        "path": "/downloads/Show.S01E01.mkv",
+        "series": {"id": 12, "title": "Show"},
+        "episodes": [{"id": 501}, {"id": 502}],
+        "quality": {"quality": {"name": "WEBDL-1080p"}},
+        "languages": [{"id": 1, "name": "English"}],
+        "releaseGroup": "GRP",
+        "downloadId": "def456",
+        "indexerFlags": 0,
+    }
+    api.manual_import([candidate])
+
+    (path, body, _, _) = client.posts[0]
+    assert path == "/api/v3/command"
+    file = body["files"][0]
+    assert file["seriesId"] == 12
+    assert file["episodeIds"] == [501, 502]
+    assert file["downloadId"] == "def456"

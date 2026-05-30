@@ -89,7 +89,9 @@ def decide(
         why = f"no viable candidate ({diag['inclusion']})" if not scored else "nothing better"
         return Decision("HOLD", why, profile_name=profile_name, current=current, diag=diag)
 
-    release, attrs, pick_closeness = topsis.select(legal, resolved)
+    selected = topsis.select(legal, resolved)
+    assert selected is not None  # legal is non-empty (guarded above); select is None only on []
+    release, attrs, pick_closeness = selected
     pick_info = {"closeness": pick_closeness, "title": release.get("title", "?"), **attrs["raw"]}
     return Decision(
         "ACT",

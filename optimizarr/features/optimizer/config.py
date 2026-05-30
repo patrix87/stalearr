@@ -197,7 +197,7 @@ def _parse_pick(raw: dict, where: str) -> str:
     return pick
 
 
-def _parse_size_aim(value: object, where: str) -> float:
+def _parse_size_aim(value: float | int | str, where: str) -> float:
     aim = float(value)
     if not (0.0 < aim <= 1.0):
         raise ValueError(f"{where}.size_aim must satisfy 0 < size_aim <= 1.0, got {aim}")

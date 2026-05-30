@@ -19,6 +19,18 @@ class SonarrApi(ArrApi):
     def _embedded_file(self, item: dict) -> dict | None:
         return item.get("episodeFile")
 
+    def _manual_import_file(self, candidate: dict) -> dict:
+        return {
+            "path": candidate.get("path"),
+            "seriesId": (candidate.get("series") or {}).get("id"),
+            "episodeIds": [e["id"] for e in (candidate.get("episodes") or []) if e.get("id")],
+            "quality": candidate.get("quality"),
+            "languages": candidate.get("languages"),
+            "releaseGroup": candidate.get("releaseGroup"),
+            "downloadId": candidate.get("downloadId"),
+            "indexerFlags": candidate.get("indexerFlags"),
+        }
+
     def _series(self, item: dict) -> dict:
         return self._series_by_id.get(item.get("seriesId") or 0, {})
 

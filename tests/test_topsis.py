@@ -109,7 +109,9 @@ def test_select_max_score_for_remux():
     big = _release(score=1_000_000, resolution=2160, size_gb=60.0)
     lean = _release(score=900_000, resolution=2160, size_gb=20.0)
     scored, _ = t.score_candidates([lean, big], 2.0, rp, 2160)
-    rel, _attrs, _clo = t.select(scored, rp)
+    selected = t.select(scored, rp)
+    assert selected is not None
+    rel, _attrs, _clo = selected
     assert rel is big  # highest score wins regardless of size
 
 
@@ -119,7 +121,9 @@ def test_select_min_size_for_compact():
     small = _release(score=850_000, resolution=2160, size_gb=7.0)
     bigger = _release(score=1_000_000, resolution=2160, size_gb=13.0)
     scored, _ = t.score_candidates([bigger, small], 2.0, rp, 2160)
-    rel, _attrs, _clo = t.select(scored, rp)
+    selected = t.select(scored, rp)
+    assert selected is not None
+    rel, _attrs, _clo = selected
     assert rel is small  # smallest wins
 
 
