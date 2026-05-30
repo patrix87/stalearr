@@ -35,10 +35,7 @@ def decide(
 
     Swap iff the pick's overall closeness beats the current file's by at least
     min_closeness_gain — closeness already weighs score, resolution, and size."""
-    current_file_score = (current_file or {}).get("customFormatScore")
-    pick, diag = topsis.pick(
-        releases, runtime_h, profile_name, target_resolution, current_file_score
-    )
+    pick, diag = topsis.pick(releases, runtime_h, profile_name, target_resolution)
     current_closeness, cur_raw = topsis.closeness_for_current_file(
         current_file or {}, runtime_h, profile_name, target_resolution
     )
@@ -47,7 +44,7 @@ def decide(
     if pick is None:
         return Decision(
             "HOLD",
-            f"no viable candidate ({diag['score_floor_tier']})",
+            f"no viable candidate ({diag['inclusion']})",
             profile_name=profile_name,
             current=current,
             diag=diag,

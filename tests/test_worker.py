@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from optimizarr.arr import ArrApi, RadarrApi
 from optimizarr.config import Connection
-from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerConfig, TopsisConfig
+from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerConfig, default_topsis
 from optimizarr.features.optimizer.state import SATISFIED, StateManager
 from optimizarr.features.optimizer.topsis import GB, Topsis
 from optimizarr.features.optimizer.worker import OptimizerWorker, _AppContext, age_ok
@@ -106,7 +106,7 @@ def _worker(state, dry_run=False):
     w = OptimizerWorker.__new__(OptimizerWorker)
     w.opt = OptimizerConfig(enabled=True, apps=[])
     w.state = state
-    w.topsis = Topsis(TopsisConfig())
+    w.topsis = Topsis(default_topsis())
     w.dry_run = dry_run
     return w
 

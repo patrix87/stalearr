@@ -21,22 +21,15 @@ For one movie (or episode), this is how candidates become a decision.
 
 ```mermaid
 flowchart TD
-    A["Item selected for evaluation"] --> B["GET /api/v3/release for the item"]
+    A["Item selected for evaluation"] --> RP["Resolve preset for the profile<br/>(name-keyword match, or explicit override)"]
+    RP --> B["GET /api/v3/release for the item"]
     B --> C["Pre-filter 1: drop hard rejections<br/>blocklisted · unparseable · wrong item · dead torrent"]
-    C --> D["Pre-filter 2: drop below GB/h sanity floor<br/>per resolution — catches fake/low-bitrate encodes"]
-    D --> E["Pre-filter 3: adaptive score floor"]
+    C --> D["Pre-filter 2: drop below per-preset GB/h floor<br/>(also drops fake/low-bitrate encodes)"]
+    D --> E["Pre-filter 3: gap-cut on score<br/>keep top cluster; cut at first drop > score_gap<br/>(negatives always dropped)"]
 
-    E --> T1{"Tier 1<br/>any release >= 900k?"}
-    T1 -->|yes| P["Candidate pool"]
-    T1 -->|no| T2{"Tier 2<br/>any >= current file's score?"}
-    T2 -->|yes| P
-    T2 -->|no| T3{"Tier 2.5<br/>any >= top score − 250k?"}
-    T3 -->|yes| P
-    T3 -->|no| T4["Tier 3: all releases >= 0<br/>(negative scores always dropped)"]
-    T4 --> P
-
-    P --> S["TOPSIS: score each candidate on 3 axes<br/>score · resolution · size (per-profile envelope + weights)"]
-    S --> R["Rank by closeness to ideal"]
+    E --> P["Candidate pool"]
+    P --> S["TOPSIS: 3 normalized axes<br/>score [0,1M] · resolution toward profile target · size tent {floor,target,bloat}"]
+    S --> R["Rank by closeness to ideal (using preset weights)"]
     R --> PICK["Pick = highest closeness"]
 
     PICK --> G{"closeness(pick) − closeness(current)<br/>>= min_closeness_gain?"}
@@ -46,19 +39,24 @@ flowchart TD
 
 ### Pipeline notes
 
-- The three pre-filters run in order; each only narrows the set. Tiers 1 → 2 → 2.5 → 3
-  are tried in sequence and the **first non-empty tier wins** — so a clean library lands
-  in Tier 1, a sparse search degrades gracefully, and negative-scored (Profilarr-banned)
-  releases are never considered.
-- TOPSIS weights and the size envelope (target/bloat GB/h) are **per profile**: a
-  `2160p Quality` item is scored differently than `2160p Efficient`. Score dominates on
-  Quality; size matters more on Efficient.
+- Each profile resolves to a **preset** (Remux/Quality/Balanced/Efficient/Compact, or
+  user-defined) via case-insensitive name-keyword matching, with per-profile overrides
+  available. The preset bundles both **weights** and a **per-resolution size tent**
+  `{floor, target, bloat}`. So Remux's 2160 tent peaks at ~25 GB/h and tolerates remux-scale
+  files, while Compact's 2160 tent has `target == floor` (it degenerates to a cost curve so
+  the smallest above the fake floor wins).
+- The gb/h floor is **per-preset**: it both drops fake/wrong-kind releases AND forms the
+  baseline of the tent. n_size rises from floor to target and falls from target to bloat,
+  so each preset is "tuned to its own size band" (remux range for Remux, bluray range for
+  Quality, lean for Efficient, smallest for Compact).
+- Score uses a **fixed** normalization `[score_anti_ideal, score_ideal]` (so good releases
+  stay comparable across items). Gap-cut handles *inclusion* only — it never moves the
+  anti-ideal up into the cluster (which would over-spread good releases).
 - The swap decision is a **single threshold**: grab iff the pick's closeness beats the
-  current file's by at least `min_closeness_gain`. Because closeness already folds in score,
-  resolution, and size (via the per-profile envelope + weights), that one check naturally
-  covers both shrinking a bloated file (smaller → higher `n_size` → higher closeness) and a
-  genuine quality upgrade (e.g. 1080p → 2160p). The policy lives in the **weights**, not in
-  separate size/upgrade gates — so tuning behavior means tuning the weights.
+  current file's by at least `min_closeness_gain`. Closeness folds score, resolution, and
+  size together, so that one check covers both shrinking a bloated file and a real quality
+  upgrade. The policy lives in the **preset's weights and size curve** — tuning behavior
+  means tuning those.
 
 ---
 

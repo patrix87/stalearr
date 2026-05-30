@@ -86,11 +86,13 @@ def test_rejects_when_neither_configured(tmp_path):
         load_config(_write(tmp_path, ""))
 
 
-def test_rejects_missing_config_file(monkeypatch):
+def test_missing_config_file_uses_defaults(monkeypatch):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
-    with pytest.raises(ValueError, match="not found"):
-        load_config("/nonexistent/config.toml")
+    config = load_config("/nonexistent/config.toml")  # no user file -> built-in defaults
+    assert config.optimizer.enabled is False
+    assert config.optimizer.topsis is not None
+    assert "Balanced" in config.optimizer.topsis.presets
 
 
 def test_rejects_invalid_radarr_release_type(monkeypatch, tmp_path):
@@ -117,14 +119,30 @@ def test_rejects_process_interval_below_floor(monkeypatch, tmp_path):
         load_config(path)
 
 
-def test_rejects_weights_not_summing_to_one(monkeypatch, tmp_path):
+def test_rejects_preset_weights_not_summing_to_one(monkeypatch, tmp_path):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
     path = _write(
         tmp_path,
-        "[optimizer.topsis.weights]\nscore = 0.5\nresolution = 0.3\nsize = 0.3\n",
+        "[optimizer.topsis.presets.Balanced]\nscore = 0.5\nresolution = 0.3\nsize = 0.3\n",
     )
     with pytest.raises(ValueError, match="sum to 1.0"):
+        load_config(path)
+
+
+def test_rejects_unknown_default_preset(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, '[optimizer.topsis]\ndefault_preset = "Nope"\n')
+    with pytest.raises(ValueError, match="default_preset"):
+        load_config(path)
+
+
+def test_rejects_unknown_preset_in_profile_override(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, '[optimizer.topsis.profiles."X"]\npreset = "Nope"\n')
+    with pytest.raises(ValueError, match="not a defined preset"):
         load_config(path)
 
 
@@ -161,7 +179,7 @@ def test_rejects_invalid_optimizer_release_type(monkeypatch, tmp_path):
         load_config(path)
 
 
-def test_parses_topsis_tables(monkeypatch, tmp_path):
+def test_parses_topsis_presets_and_overrides(monkeypatch, tmp_path):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
     path = _write(
@@ -172,20 +190,27 @@ def test_parses_topsis_tables(monkeypatch, tmp_path):
         queue_max = 2
 
         [optimizer.topsis]
-        score_floor_preferred = 800000
+        score_gap = 0.30
 
-        [optimizer.topsis.size_envelope_by_profile."2160p Quality"]
-        "2160" = [12.0, 40.0]
+        [optimizer.topsis.profiles."2160p Remux"]
+        preset = "Remux"
 
-        [optimizer.topsis.sanity_gbh_floor_by_resolution]
-        "1080" = 0.9
+        [optimizer.topsis.profiles."Custom 1080p"]
+        weights = { score = 0.5, resolution = 0.1, size = 0.4 }
         """,
     )
 
     config = load_config(path)
-    topsis = config.optimizer.topsis
+    t = config.optimizer.topsis
     assert config.optimizer.enabled is True
     assert config.optimizer.queue_max == 2
-    assert topsis.score_floor_preferred == 800000
-    assert topsis.size_envelope_by_profile["2160p Quality"][2160] == (12.0, 40.0)
-    assert topsis.sanity_gbh_floor_by_resolution[1080] == 0.9
+    assert t.score_gap == 0.30
+    # shipped presets survive the deep-merge
+    assert {"Remux", "Quality", "Balanced", "Efficient", "Compact"} <= set(t.presets)
+    assert t.presets["Compact"].weights["size"] == 0.65
+    assert t.presets["Quality"].size_by_resolution[2160] == (4.0, 10.0, 50.0)
+    # overrides parse as preset-ref or explicit weights
+    assert t.profiles["2160p Remux"].preset == "Remux"
+    custom_weights = t.profiles["Custom 1080p"].weights
+    assert custom_weights is not None and custom_weights["size"] == 0.4
+    assert t.default_preset == "Efficient"

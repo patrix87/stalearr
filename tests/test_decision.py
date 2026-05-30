@@ -1,10 +1,10 @@
-from optimizarr.features.optimizer.config import TopsisConfig
+from optimizarr.features.optimizer.config import default_topsis
 from optimizarr.features.optimizer.decision import decide, format_decision
 from optimizarr.features.optimizer.topsis import GB, Topsis
 
 
 def _topsis() -> Topsis:
-    return Topsis(TopsisConfig())
+    return Topsis(default_topsis())
 
 
 def _release(guid="g1", score=1_000_000, resolution=2160, size_gb=14.0):

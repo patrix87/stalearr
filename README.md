@@ -1,4 +1,4 @@
-# optimizarr
+# Optimizarr
 
 Two complementary jobs for a Radarr/Sonarr library, in one container:
 
@@ -17,17 +17,17 @@ design (with diagrams).
 
 ## Designed for Profilarr quality profiles
 
-optimizarr is built to pair with **[Profilarr](https://github.com/Dictionarry-Hub/profilarr)**.
-The defaults assume Profilarr's custom-format scoring convention — a "perfect" release
-scores around **1,000,000** — and the per-profile tuning (weights, size envelopes) is keyed
-by **quality-profile names** like `2160p Quality` or `1080p Efficient`. If you run Profilarr,
-the defaults work out of the box.
+Optimizarr is built to pair with **[Profilarr](https://github.com/Dictionarry-Hub/profilarr)**.
+The defaults assume Profilarr's custom-format scoring convention — a "perfect" release scores
+around **1,000,000** — and the shipped **presets** (Remux, Quality, Balanced, Efficient,
+Compact) auto-attach to a Radarr/Sonarr quality profile whose name contains a preset keyword,
+e.g. `2160p Quality` → Quality, `1080p Efficient` → Efficient, `2160p Remux` → Remux.
 
-It is **not strictly required**, though. The score scale and the profile-name-keyed tuning
-are all configurable: set `score_ideal` to match your own scoring target, and add entries
-under `weights_by_profile` / `size_envelope_by_profile` keyed by *your* profile names. With
-those adjusted, optimizarr works against any custom-format scoring scheme — Profilarr just
-saves you from tuning it yourself.
+It is **not strictly required**, though. Both the score scale and the presets are
+configurable: redefine a shipped preset (`[optimizer.topsis.presets.<Name>]`), add new ones,
+or pin an exact profile name to a specific preset or explicit weights via
+`[optimizer.topsis.profiles."<name>"]`. With those adjusted, Optimizarr works against any
+custom-format scoring scheme — Profilarr just saves you from tuning it yourself.
 
 ## How the optimizer works (short version)
 
@@ -36,10 +36,14 @@ download queue is at or under `queue_max`, picks one not-yet-satisfied item that
 already downloading and evaluates it:
 
 1. Fetch candidate releases (`GET /api/v3/release`).
-2. Pre-filter: drop hard rejections (blocklisted/unparseable/dead), then a per-resolution
-   GB/h sanity floor, then an adaptive 4-tier score floor (negatives always dropped).
-3. Rank survivors with TOPSIS on three axes — score, resolution, size — using per-profile
-   weights and size envelopes.
+2. Pre-filter: drop hard rejections (blocklisted/unparseable/dead), then a per-preset GB/h
+   floor (drops fake/low-bitrate encodes), then a **gap-cut** on score (keep the top cluster
+   down to the first relative drop greater than `score_gap`; negatives always dropped).
+3. Rank survivors with TOPSIS on three axes — score, resolution, size. Score normalizes on a
+   fixed `[anti_ideal, ideal]` scale; resolution toward the profile target; size is a per-preset
+   **tent** `{floor, target, bloat}` peaking at the *target* GB/h for that release kind (Remux's
+   target sits in remux territory; Compact's target collapses to the floor → smallest wins).
+   Weights and size curve come from the preset attached to the Radarr/Sonarr profile.
 4. If the top pick's overall closeness beats the current file's by at least
    `min_closeness_gain` → **grab it**. Otherwise → **HOLD** and mark the item *satisfied* so
    it drops out of the pool until `reevaluate_after_days` elapses. Closeness already weighs
@@ -77,11 +81,12 @@ If neither Radarr nor Sonarr is configured, the container exits 1.
 
 ### `config.toml`
 
-All behavior lives in `config.toml`. The full set of keys — `dry_run`, the `[unmonitor]`
-schedule/per-app options, the `[optimizer]` worker settings, the per-app `min_age_days`
-release-age gate, and the `[optimizer.topsis]` tuning (per-profile weights and size
-envelopes, the score floor, and the `min_closeness_gain` swap threshold) — is documented
-inline in [`config.example.toml`](config.example.toml). Copy it to `config.toml` and edit.
+All behavior lives in `config.toml`, which is **layered on top of the package's bundled
+`defaults.toml`** — so your `config.toml` only needs the overrides you care about. The full
+set of keys — `dry_run`, `[unmonitor]`, `[optimizer]` worker settings, per-app `min_age_days`,
+and the `[optimizer.topsis]` tuning (presets, per-profile overrides, `score_gap`,
+`min_closeness_gain`) — is documented inline in [`config.example.toml`](config.example.toml).
+Copy it to `config.toml` and edit.
 
 The TOPSIS defaults match the tuning validated during development; you should only need to
 touch them to add new profile names or adjust targets.

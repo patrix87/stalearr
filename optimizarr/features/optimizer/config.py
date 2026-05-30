@@ -1,11 +1,13 @@
 """Optimizer feature configuration: schema + parsing of the [optimizer] TOML section.
 
-The shared loader (optimizarr.config) delegates to parse_optimizer() here, so the optimizer
-owns its own config surface.
+Tuning values (presets, size curves, anchors) come from the merged config (defaults.toml +
+the user's config.toml) — there are no magic defaults baked into this module. The shared
+loader (optimizarr.config) delegates to parse_optimizer() here.
 """
 
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any
 
 from optimizarr.config import RADARR_RELEASE_TYPES, SONARR_RELEASE_TYPES
 
@@ -13,50 +15,38 @@ PICK_ORDERS = {"random", "ordered"}
 
 
 @dataclass
+class Preset:
+    """A named bundle: TOPSIS weights + a per-resolution size tent {floor, target, bloat}."""
+
+    weights: dict[str, float]  # keys: score, resolution, size (sum 1.0)
+    # resolution -> (floor, target, bloat) GB/h. target == floor degenerates to a cost curve.
+    size_by_resolution: dict[int, tuple[float, float, float]]
+
+
+@dataclass
+class ProfileOverride:
+    """Exact-name override: reference a preset, or give explicit weights / size curve."""
+
+    preset: str | None = None
+    weights: dict[str, float] | None = None
+    size_by_resolution: dict[int, tuple[float, float, float]] | None = None
+
+
+@dataclass
 class TopsisConfig:
-    score_ideal: int = 1_000_000
-    resolution_ideal: int = 2160
-    score_anti_ideal: int = 0
-    resolution_anti_ideal: int = 480
-    score_floor_preferred: int = 900_000
-    score_drop_from_top: int = 250_000
-    # Swap when the pick improves overall closeness by at least this much. Closeness
-    # already folds in score, resolution, and size (per-profile envelope + weights), so
-    # this single small threshold covers both shrinks and quality upgrades.
-    min_closeness_gain: float = 0.02
-    weights: dict[str, float] = field(
-        default_factory=lambda: {"score": 0.40, "resolution": 0.25, "size": 0.35}
-    )
-    weights_by_profile: dict[str, dict[str, float]] = field(
-        default_factory=lambda: {
-            "2160p Quality": {"score": 0.60, "resolution": 0.15, "size": 0.25},
-        }
-    )
-    sanity_gbh_floor_by_resolution: dict[int, float] = field(
-        default_factory=lambda: {480: 0.2, 720: 0.4, 1080: 0.8, 2160: 1.5}
-    )
-    size_envelope_by_resolution: dict[int, tuple[float, float]] = field(
-        default_factory=lambda: {
-            480: (0.5, 5.0),
-            720: (1.5, 8.0),
-            1080: (3.0, 12.0),
-            2160: (6.0, 25.0),
-        }
-    )
-    size_envelope_by_profile: dict[str, dict[int, tuple[float, float]]] = field(
-        default_factory=lambda: {
-            "1080p Efficient": {1080: (3.0, 12.0)},
-            "2160p Efficient": {2160: (6.0, 25.0)},
-            "2160p Quality": {2160: (12.0, 40.0)},
-        }
-    )
+    score_ideal: int
+    score_anti_ideal: int
+    resolution_ideal: int
+    resolution_anti_ideal: int
+    score_gap: float
+    min_closeness_gain: float
+    default_preset: str
+    presets: dict[str, Preset]
+    profiles: dict[str, ProfileOverride] = field(default_factory=dict)
 
 
 @dataclass
 class OptimizerAppConfig:
-    # Only consider items at least this many days past their release date.
-    # 0 = no age gate (consider everything with a file). release_type selects which
-    # date field the age is measured from (same fields as the unmonitor feature).
     min_age_days: int = 0
     release_type: str = ""
 
@@ -70,92 +60,91 @@ class OptimizerConfig:
     process_interval_seconds: int = 15
     list_refresh_minutes: int = 15
     reevaluate_after_days: int = 30
-    radarr: OptimizerAppConfig = field(
-        default_factory=lambda: OptimizerAppConfig(release_type="digitalRelease")
-    )
-    sonarr: OptimizerAppConfig = field(
-        default_factory=lambda: OptimizerAppConfig(release_type="airDateUtc")
-    )
-    topsis: TopsisConfig = field(default_factory=TopsisConfig)
+    radarr: OptimizerAppConfig = field(default_factory=OptimizerAppConfig)
+    sonarr: OptimizerAppConfig = field(default_factory=OptimizerAppConfig)
+    topsis: TopsisConfig = field(default_factory=lambda: default_topsis())
 
 
 # ----- parsing helpers -----
 
 
-def _int_keyed(raw: dict, where: str) -> dict[int, Any]:
-    out: dict[int, Any] = {}
-    for k, v in raw.items():
-        try:
-            out[int(k)] = v
-        except (TypeError, ValueError) as e:
-            raise ValueError(f"{where}: key {k!r} is not an integer resolution") from e
-    return out
-
-
-def _envelope_pair(value: object, where: str) -> tuple[float, float]:
-    if not isinstance(value, (list, tuple)) or len(value) != 2:
-        raise ValueError(f"{where}: expected [target, bloat] pair, got {value!r}")
-    return (float(value[0]), float(value[1]))
-
-
-def _validate_weights(where: str, w: dict[str, float]) -> None:
+def _weights(raw: dict, where: str) -> dict[str, float]:
+    w = {k: float(raw[k]) for k in ("score", "resolution", "size") if k in raw}
     missing = {"score", "resolution", "size"} - w.keys()
     if missing:
         raise ValueError(f"{where}: missing weight keys {sorted(missing)}")
     total = sum(w.values())
     if abs(total - 1.0) > 0.01:
         raise ValueError(f"{where}: weights must sum to 1.0, got {total:.3f}")
+    return w
+
+
+def _size_curve(raw: dict, where: str) -> dict[int, tuple[float, float, float]]:
+    out: dict[int, tuple[float, float, float]] = {}
+    for res, entry in raw.items():
+        try:
+            res_int = int(res)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{where}: key {res!r} is not an integer resolution") from e
+        if not isinstance(entry, dict) or not {"floor", "target", "bloat"} <= entry.keys():
+            raise ValueError(f"{where}.{res}: expected {{floor, target, bloat}}, got {entry!r}")
+        floor = float(entry["floor"])
+        target = float(entry["target"])
+        bloat = float(entry["bloat"])
+        if bloat <= floor:
+            raise ValueError(f"{where}.{res}: bloat ({bloat}) must exceed floor ({floor})")
+        if not (floor <= target <= bloat):
+            raise ValueError(
+                f"{where}.{res}: target ({target}) must satisfy floor <= target <= bloat"
+            )
+        out[res_int] = (floor, target, bloat)
+    return out
+
+
+def _parse_preset(raw: dict, where: str) -> Preset:
+    return Preset(
+        weights=_weights(raw, where),
+        size_by_resolution=_size_curve(raw.get("size_by_resolution", {}), f"{where}.size"),
+    )
+
+
+def _parse_profile_override(raw: dict, where: str) -> ProfileOverride:
+    weights = _weights(raw["weights"], f"{where}.weights") if "weights" in raw else None
+    size = (
+        _size_curve(raw["size_by_resolution"], f"{where}.size_by_resolution")
+        if "size_by_resolution" in raw
+        else None
+    )
+    return ProfileOverride(preset=raw.get("preset"), weights=weights, size_by_resolution=size)
 
 
 def _parse_topsis(raw: dict) -> TopsisConfig:
-    cfg = TopsisConfig()
-    for key in (
-        "score_ideal",
-        "resolution_ideal",
-        "score_anti_ideal",
-        "resolution_anti_ideal",
-        "score_floor_preferred",
-        "score_drop_from_top",
-    ):
-        if key in raw:
-            setattr(cfg, key, int(raw[key]))
-    if "min_closeness_gain" in raw:
-        cfg.min_closeness_gain = float(raw["min_closeness_gain"])
-
-    if "weights" in raw:
-        cfg.weights = {k: float(v) for k, v in raw["weights"].items()}
-    if "weights_by_profile" in raw:
-        cfg.weights_by_profile = {
-            name: {k: float(v) for k, v in w.items()}
-            for name, w in raw["weights_by_profile"].items()
-        }
-    if "sanity_gbh_floor_by_resolution" in raw:
-        cfg.sanity_gbh_floor_by_resolution = {
-            res: float(v)
-            for res, v in _int_keyed(
-                raw["sanity_gbh_floor_by_resolution"], "sanity_gbh_floor_by_resolution"
-            ).items()
-        }
-    if "size_envelope_by_resolution" in raw:
-        cfg.size_envelope_by_resolution = {
-            res: _envelope_pair(v, f"size_envelope_by_resolution.{res}")
-            for res, v in _int_keyed(
-                raw["size_envelope_by_resolution"], "size_envelope_by_resolution"
-            ).items()
-        }
-    if "size_envelope_by_profile" in raw:
-        cfg.size_envelope_by_profile = {
-            name: {
-                res: _envelope_pair(v, f"size_envelope_by_profile.{name}.{res}")
-                for res, v in _int_keyed(inner, f"size_envelope_by_profile.{name}").items()
-            }
-            for name, inner in raw["size_envelope_by_profile"].items()
-        }
-
-    _validate_weights("weights", cfg.weights)
-    for name, w in cfg.weights_by_profile.items():
-        _validate_weights(f"weights_by_profile.{name}", w)
-    return cfg
+    presets = {
+        name: _parse_preset(p, f"presets.{name}") for name, p in raw.get("presets", {}).items()
+    }
+    if not presets:
+        raise ValueError("optimizer.topsis.presets is empty (defaults.toml should define them)")
+    default_preset = str(raw.get("default_preset", "Balanced"))
+    if default_preset not in presets:
+        raise ValueError(f"default_preset {default_preset!r} is not a defined preset")
+    profiles = {
+        name: _parse_profile_override(o, f"profiles.{name}")
+        for name, o in raw.get("profiles", {}).items()
+    }
+    for name, ov in profiles.items():
+        if ov.preset is not None and ov.preset not in presets:
+            raise ValueError(f"profiles.{name}.preset {ov.preset!r} is not a defined preset")
+    return TopsisConfig(
+        score_ideal=int(raw["score_ideal"]),
+        score_anti_ideal=int(raw["score_anti_ideal"]),
+        resolution_ideal=int(raw["resolution_ideal"]),
+        resolution_anti_ideal=int(raw["resolution_anti_ideal"]),
+        score_gap=float(raw["score_gap"]),
+        min_closeness_gain=float(raw["min_closeness_gain"]),
+        default_preset=default_preset,
+        presets=presets,
+        profiles=profiles,
+    )
 
 
 def _parse_optimizer_app(
@@ -201,3 +190,11 @@ def parse_optimizer(raw: dict) -> OptimizerConfig:
         ),
         topsis=_parse_topsis(raw.get("topsis", {})),
     )
+
+
+def default_topsis() -> TopsisConfig:
+    """Parse the bundled defaults' TOPSIS section. For tests and tools that need a config
+    without going through the full env-dependent load_config()."""
+    from optimizarr.config import _load_defaults
+
+    return _parse_topsis(_load_defaults()["optimizer"]["topsis"])

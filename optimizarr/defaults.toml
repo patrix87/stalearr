@@ -1,0 +1,106 @@
+# optimizarr built-in defaults. Loaded as the base layer; the user's /config/config.toml is
+# deep-merged on top. All tuning lives here (not in Python), so there are no magic values in
+# the code. Do not edit in a deployment — override in config.toml instead.
+
+dry_run = false
+
+# ===== Unmonitor =====
+[unmonitor]
+enabled = true
+cron_schedule = "0 4 * * *"
+run_on_start = true
+
+[unmonitor.radarr]
+days = 30
+release_type = "digitalRelease"
+require_cutoff_met = true
+
+[unmonitor.sonarr]
+days = 30
+release_type = "airDateUtc"
+require_cutoff_met = true
+
+# ===== Optimizer =====
+[optimizer]
+enabled = false
+apps = ["radarr", "sonarr"]
+queue_max = 5
+pick_order = "random"
+process_interval_seconds = 15
+list_refresh_minutes = 15
+reevaluate_after_days = 30
+
+[optimizer.radarr]
+min_age_days = 0
+release_type = "digitalRelease"
+
+[optimizer.sonarr]
+min_age_days = 0
+release_type = "airDateUtc"
+
+# ===== TOPSIS =====
+[optimizer.topsis]
+score_ideal = 1000000
+score_anti_ideal = 0
+resolution_ideal = 2160          # fallback resolution target when a profile exposes none
+resolution_anti_ideal = 480
+# gap-cut inclusion: keep the top score cluster down to the first relative drop greater than this.
+score_gap = 0.20
+# Swap only when the pick's closeness beats the current file's by at least this much.
+min_closeness_gain = 0.02
+# Preset used when a profile name matches no preset by keyword.
+default_preset = "Efficient"
+
+# Presets bundle weights (score/resolution/size, sum 1.0) + a per-resolution size tent.
+# size_by_resolution entries are { floor, target, bloat } GB/h:
+#   - floor   : drop threshold (releases below are removed before TOPSIS); curve baseline
+#   - target  : n_size = 1.0 here (the kind of release this preset is designed to pick)
+#   - bloat   : n_size = 0 here (too big to be a fit for this preset)
+# When target == floor the tent degenerates to a pure cost curve (smaller wins) — that's how
+# Compact behaves. For Remux the target sits in remux territory, so big files are favored.
+# Profiles attach to a preset whose name is a (case-insensitive) substring of the profile name;
+# e.g. "2160p Quality" -> Quality, "2160p Remux" -> Remux. Add more presets freely.
+
+[optimizer.topsis.presets.Remux]
+score = 0.70
+resolution = 0.15
+size = 0.15
+# Untouched UHD/BluRay remux. Target at the LOW end of the remux size band so leaner remuxes
+# win over bigger ones, while bloat stays wide enough that large remuxes aren't dropped.
+size_by_resolution = { "480" = { floor = 0.4, target = 1.5, bloat = 10 }, "720" = { floor = 1.5, target = 4.0, bloat = 18 }, "1080" = { floor = 6.0, target = 10.0, bloat = 40 }, "2160" = { floor = 12.0, target = 20.0, bloat = 100 } }
+
+[optimizer.topsis.presets.Quality]
+score = 0.65
+resolution = 0.15
+size = 0.20
+# Full BluRay encode (not remux): target at the low end so a leaner Quality encode wins.
+size_by_resolution = { "480" = { floor = 0.2, target = 0.8, bloat = 6 }, "720" = { floor = 0.5, target = 2.0, bloat = 10 }, "1080" = { floor = 2.0, target = 4.0, bloat = 22 }, "2160" = { floor = 4.0, target = 10.0, bloat = 50 } }
+
+[optimizer.topsis.presets.Balanced]
+score = 0.45
+resolution = 0.10
+size = 0.45
+# Just above Efficient: target at the low end of a comfortable codec encode.
+size_by_resolution = { "480" = { floor = 0.2, target = 0.5, bloat = 4 }, "720" = { floor = 0.4, target = 1.2, bloat = 7 }, "1080" = { floor = 1.0, target = 2.5, bloat = 14 }, "2160" = { floor = 2.0, target = 5.0, bloat = 25 } }
+
+[optimizer.topsis.presets.Efficient]
+score = 0.55
+resolution = 0.10
+size = 0.35
+# A good codec encode (well-tuned x265/HEVC): target at the low end so a slimmer good encode wins.
+size_by_resolution = { "480" = { floor = 0.2, target = 0.35, bloat = 3 }, "720" = { floor = 0.3, target = 0.8, bloat = 5 }, "1080" = { floor = 0.8, target = 2.0, bloat = 10 }, "2160" = { floor = 1.5, target = 4.0, bloat = 16 } }
+
+[optimizer.topsis.presets.Compact]
+score = 0.20
+resolution = 0.15
+size = 0.65
+# As small as it gets above the fake floor. target == floor -> pure cost (smallest wins).
+size_by_resolution = { "480" = { floor = 0.2, target = 0.2, bloat = 2 }, "720" = { floor = 0.3, target = 0.3, bloat = 4 }, "1080" = { floor = 0.8, target = 0.8, bloat = 6 }, "2160" = { floor = 1.5, target = 1.5, bloat = 10 } }
+
+# Per-profile-name overrides. Either reference a preset, or give explicit weights, and
+# optionally override the size curve. Example:
+# [optimizer.topsis.profiles."2160p Remux"]
+# preset = "Remux"
+# [optimizer.topsis.profiles."My Custom 1080p"]
+# weights = { score = 0.5, resolution = 0.1, size = 0.4 }
+# size_by_resolution = { "1080" = { floor = 1.0, target = 4.0, bloat = 20 } }
