@@ -7,7 +7,7 @@ design (and the validation roadmap), see
 
 The optimizer evaluates the releases available for one library item, decides whether a better
 one exists, and grabs it through Radarr/Sonarr. It is built around the reality that **grabbed
-releases frequently fail to download** — so *"optimized"* means *the algorithm can no longer find
+releases frequently fail to download**, so *"optimized"* means *the algorithm can no longer find
 anything better than the current file*, never merely *"we triggered a grab."*
 
 There are two big ideas:
@@ -23,7 +23,7 @@ There are two big ideas:
 
 ## 1. The size model: one shared reference, relative aims
 
-`[optimizer.topsis.reference]` defines, per resolution, a realistic GiB/h band — shared by every
+`[optimizer.topsis.reference]` defines, per resolution, a realistic GiB/h band, shared by every
 profile (`GB = 1024³`, so GiB):
 
 | resolution | floor | target | ceiling |
@@ -33,10 +33,10 @@ profile (`GB = 1024³`, so GiB):
 | 720 | 0.4 | 1.0 | 4 |
 | 480 | 0.2 | 0.5 | 3 |
 
-- **floor** — below this the encode is fake / too soft for the resolution → dropped before
+- **floor**: below this the encode is fake / too soft for the resolution → dropped before
   scoring (the only place size can veto a release).
-- **target** — what a *good* (HDR-assumed, lean) release actually weighs at this resolution.
-- **ceiling** — above this is bloat; size desirability reaches 0.
+- **target**: what a *good* (HDR-assumed, lean) release actually weighs at this resolution.
+- **ceiling**: above this is bloat; size desirability reaches 0.
 
 Each profile only adds a relative **`size_aim`** (a fraction of `target`). Its size-desirability
 curve is **one-sided**:
@@ -44,7 +44,7 @@ curve is **one-sided**:
 ```
 aim = size_aim × reference.target[resolution]
 
-n_size(gbh) = 1.0                          if gbh ≤ aim          (plateau — smaller never punished)
+n_size(gbh) = 1.0                          if gbh ≤ aim          (plateau, smaller never punished)
             = (ceiling − gbh)/(ceiling − aim)   if aim < gbh < ceiling   (linear ramp down)
             = 0.0                          if gbh ≥ ceiling
 ```
@@ -53,7 +53,7 @@ Two consequences make this safe for a space-saving tool:
 
 - **Nothing is ever inflated.** A file already at or below the aim scores `n_size = 1.0`, so
   TOPSIS has no reason to swap it for a bigger one. A tiny, good-scoring file stays.
-- **Among files at/below the aim, size ties at 1.0 → score breaks the tie** — i.e. "small
+- **Among files at/below the aim, size ties at 1.0 → score breaks the tie**, i.e. "small
   enough, then best score," which is exactly "good *and* small."
 
 Worked aim points (`size_aim × target`):
@@ -64,7 +64,7 @@ Worked aim points (`size_aim × target`):
 | Balanced | 0.8 | 5.2 | 2.0 | slightly smaller |
 | Efficient | 0.65 | 4.2 | 1.6 | much smaller |
 | Compact | 0.5 | 3.25 | 1.25 | toward the floor |
-| Remux | — | — | — | ignores size (weight ≈ 0) |
+| Remux | n/a | n/a | n/a | ignores size (weight ≈ 0) |
 
 ---
 
@@ -80,10 +80,10 @@ n_size       = one-sided curve above
 
 Score normalizes on a **fixed** scale (`[0, 1,000,000]` by default) so good releases stay
 comparable across items. Resolution climbs toward the profile's target height (low weight on
-purpose — Profilarr already folds resolution into the score, so this axis mostly avoids
+purpose, since Profilarr already folds resolution into the score, so this axis mostly avoids
 double-counting).
 
-A profile's **weights** (summing to 1.0) combine the axes into a TOPSIS *closeness* — distance
+A profile's **weights** (summing to 1.0) combine the axes into a TOPSIS *closeness*, the distance
 to the ideal point `(1,1,1)` vs the anti-ideal `(0,0,0)`:
 
 ```
@@ -102,7 +102,7 @@ Shipped weights:
 | Efficient | 0.40 | 0.10 | 0.50 | `topsis` |
 | Compact | 0.20 | 0.10 | 0.70 | `min_size` |
 
-`max_score` (Remux) and `min_size` (Compact) are deterministic single-axis picks — once the gate
+`max_score` (Remux) and `min_size` (Compact) are deterministic single-axis picks; once the gate
 has run, those profiles don't need a blend, and a deterministic sort is clearer and
 oscillation-proof. The middle three balance score vs size, which is what TOPSIS is for.
 
@@ -120,14 +120,14 @@ flowchart TD
     E --> SC["Score survivors (TOPSIS closeness)"]
     SC --> GATE["TRANSITION GATE<br/>drop every move from the current file that is forbidden"]
     GATE --> LEFT{"any legal candidate?"}
-    LEFT -->|no| HOLD["HOLD — mark satisfied"]
+    LEFT -->|no| HOLD["HOLD: mark satisfied"]
     LEFT -->|yes| PICK["PICK best survivor<br/>topsis / max_score / min_size"]
-    PICK --> ACT["ACT — POST grab {guid, indexerId}"]
+    PICK --> ACT["ACT: POST grab {guid, indexerId}"]
 ```
 
 Two app-policy pre-filters can run before scoring: `allow_size_increase = false` drops anything
 bigger than the current file, and `allow_quality_downgrade = false` drops anything lower-scoring
-(turning the latter off neutralizes the size-leaning profiles — that's the point of the flag).
+(turning the latter off neutralizes the size-leaning profiles, which is the point of the flag).
 
 There is **no `min_closeness_gain` threshold** anymore. A candidate that survives the gate is, by
 construction, a legal and beneficial change, so the rule is simply: **ACT if a legal survivor
@@ -140,16 +140,16 @@ exists, else HOLD.** Closeness decides *which* survivor, not *whether* to act.
 The gate compares a candidate to the **current file** on three deltas and asks "is this move
 allowed?" Magnitudes are bucketed on stable, fixed thresholds:
 
-- **score** — on `Δn_score` (normalized): `same` within `score_slack` (0.02); `much_*` beyond
+- **score**: on `Δn_score` (normalized): `same` within `score_slack` (0.02); `much_*` beyond
   `score_much` (0.10); `slightly_*` in between.
-- **size** — on the *relative* GiB/h delta: `same` within `size_slack` (3%); `much_smaller`
+- **size**: on the *relative* GiB/h delta: `same` within `size_slack` (3%); `much_smaller`
   beyond `size_much` (30%).
-- **resolution** — candidate height vs current height.
+- **resolution**: candidate height vs current height.
 
 ### Universal rules (every profile)
 
 1. A **resolution downgrade** is never allowed.
-2. A **resolution upgrade** waives the size rules (a higher-res file is expected to be bigger) —
+2. A **resolution upgrade** waives the size rules (a higher-res file is expected to be bigger),
    allowed unless the score is *much* lower.
 3. At equal resolution, a **bigger file with no score increase** is never allowed.
 
@@ -158,7 +158,7 @@ allowed?" Magnitudes are bucketed on stable, fixed thresholds:
 Generated from the rules in `transitions.py` (`✅` = legal move, `·` = forbidden). Rows are the
 candidate's score vs current; columns its size vs current.
 
-**Remux** — score is everything; never trades score for size:
+**Remux**: score is everything; never trades score for size:
 
 | score＼size | much_smaller | smaller | same | bigger |
 | --- | --- | --- | --- | --- |
@@ -168,7 +168,7 @@ candidate's score vs current; columns its size vs current.
 | slightly lower | · | · | · | · |
 | much lower | · | · | · | · |
 
-**Quality** — max score, mild size care (a slight score drop only buys a *much* smaller file; a
+**Quality**: max score, mild size care (a slight score drop only buys a *much* smaller file; a
 bigger file needs a *much* higher score):
 
 | score＼size | much_smaller | smaller | same | bigger |
@@ -179,8 +179,8 @@ bigger file needs a *much* higher score):
 | slightly lower | ✅ | · | · | · |
 | much lower | · | · | · | · |
 
-**Balanced / Efficient** — good score *and* smaller (they share this matrix; they differ only in
-TOPSIS weights — Balanced leans score, Efficient leans size):
+**Balanced / Efficient**: good score *and* smaller (they share this matrix; they differ only in
+TOPSIS weights, where Balanced leans score, Efficient leans size):
 
 | score＼size | much_smaller | smaller | same | bigger |
 | --- | --- | --- | --- | --- |
@@ -190,7 +190,7 @@ TOPSIS weights — Balanced leans score, Efficient leans size):
 | slightly lower | ✅ | ✅ | · | · |
 | much lower | · | · | · | · |
 
-**Compact** — smallest viable; **never a bigger file**, and a real score drop is OK only if the
+**Compact**: smallest viable; **never a bigger file**, and a real score drop is OK only if the
 file is *much* smaller and still above `viability_score`:
 
 | score＼size | much_smaller | smaller | same | bigger |
@@ -203,13 +203,13 @@ file is *much* smaller and still above `viability_score`:
 
 These come from a small set of per-profile flags (`accept_score_drop`,
 `slight_drop_needs_much_smaller`, `allow_bigger_for_score`, `bigger_needs_much_score`,
-`accept_much_lower_score`, `viability_score`) — see the `[…transitions]` blocks in
+`accept_much_lower_score`, `viability_score`); see the `[…transitions]` blocks in
 `defaults.toml`.
 
 ### No oscillation, by construction
 
 The accept relation is a **strict partial order**: if `A → B` is a legal improvement for a
-profile, then `B → A` is forbidden for it — so two files can never ping-pong. This holds because
+profile, then `B → A` is forbidden for it, so two files can never ping-pong. This holds because
 the thresholds are fixed (field-relativity lives only in the gap-cut pre-filter) and
 `score_much > score_slack` / `size_much > size_slack` are **enforced at config load**. It is
 checked in tests over 100k random pairs across all profiles.
@@ -266,13 +266,13 @@ flowchart TD
     Q --> Gate{"queue ≤ queue_max?"}
     Gate -->|no| WaitQ["Sleep process_interval_seconds"]
     WaitQ --> Q
-    Gate -->|yes| Pick["Pick item — random or ordered"]
+    Gate -->|yes| Pick["Pick item: random or ordered"]
     Pick --> Dl{"already in queue?"}
-    Dl -->|yes| Skip["Skip — already downloading"]
+    Dl -->|yes| Skip["Skip: already downloading"]
     Dl -->|no| Eval["Evaluate (pipeline §3)"]
     Eval --> Decide{"ACT or HOLD?"}
     Decide -->|HOLD| Sat["Mark satisfied"]
-    Decide -->|ACT| Grab["POST grab — record nothing"]
+    Decide -->|ACT| Grab["POST grab: record nothing"]
     Skip --> Settle["Sleep process_interval_seconds (settle)"]
     Sat --> Settle
     Grab --> Settle
@@ -280,7 +280,7 @@ flowchart TD
 ```
 
 - **One queue fetch per iteration** serves both the pace gate (`queue_max`) and the "already
-  downloading?" skip — so there's **no in-flight state** to track and a restart needs no
+  downloading?" skip, so there's **no in-flight state** to track and a restart needs no
   reconciliation.
 - `process_interval_seconds` (default 15, min 10) doubles as a **settle delay**: after a grab,
   Radarr needs a moment to register the release in the queue before the next `queue_max` check.
@@ -290,20 +290,20 @@ flowchart TD
 
 ### Per-item state lifecycle
 
-State (`/data/state.json`, keyed by item id) records exactly one thing — whether an item is
-**satisfied** — which is what makes failure handling self-correcting.
+State (`/data/state.json`, keyed by item id) records exactly one thing, whether an item is
+**satisfied**, which is what makes failure handling self-correcting.
 
 ```mermaid
 stateDiagram-v2
     [*] --> Unprocessed: not in state
-    Unprocessed --> Unprocessed: ACT — grab posted (state unchanged)
-    Unprocessed --> Satisfied: HOLD — nothing better than current
+    Unprocessed --> Unprocessed: ACT: grab posted (state unchanged)
+    Unprocessed --> Satisfied: HOLD: nothing better than current
     Satisfied --> Unprocessed: reevaluate_after_days elapsed
 ```
 
 - A grab is **never recorded**. A grab that **succeeds** replaces the file; next evaluation finds
   nothing better → **satisfied** → leaves the pool. A grab that **fails** was never satisfied, so
-  the item is retried — and by then the dead release is blocklisted, so pre-filter 1 drops it and
+  the item is retried, and by then the dead release is blocklisted, so pre-filter 1 drops it and
   the next-best candidate is picked. Repeated failures walk down the ranking until one sticks.
 - A download **in progress** is skipped via live queue membership, never re-grabbed.
 
@@ -320,7 +320,7 @@ the \*arr apps stop chasing upgrades off their RSS feeds just because newer rele
 An item is unmonitored when **all** of these hold (`features/unmonitor/candidates.py`):
 
 1. it is currently **monitored** (otherwise nothing to do);
-2. it **has a file** — never unmonitor a wanted-but-undownloaded item (that would mean "give
+2. it **has a file**: never unmonitor a wanted-but-undownloaded item (that would mean "give
    up"); only stop chasing *upgrades*;
 3. if `require_cutoff_met = true`, its quality **cutoff is met** (don't stop early if it hasn't
    reached the target quality yet);
