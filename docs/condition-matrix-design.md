@@ -341,10 +341,44 @@ Per-profile-name overrides inherit the same fields.
      both A→B and B→A accepted).
    - `test_decision.py`: resolution-fallback behavior; the four worked examples from the user.
    - Doc-sync test: `matrix()` output matches the tables in this file (or generate the tables).
-7. **Docs**: fold the final matrices into `optimizer-design.md`; update README's "How it works"
+7. **Validate the existing weights and limits** (see [Validation](#validation-of-current-weights-and-limits)).
+8. **Docs**: fold the final matrices into `optimizer-design.md`; update README's "How it works"
    step 3–4; keep this file as the rationale.
-8. **Lint/format**: `ruff check` + `ruff format` before done; write validation results to a
+9. **Lint/format**: `ruff check` + `ruff format` before done; write validation results to a
    timestamped `.md` in `reports/`.
+
+## Validation of current weights and limits
+
+Before trusting the redesign, **re-validate the numbers we already ship** — the preset weights,
+the per-resolution `size_by_resolution` floors/targets/bloats, `score_gap`, and the new
+`score_slack` / `score_much` / `size_slack` thresholds. The point is to confirm the values we
+*have* still produce the right picks once the gate + monotonic curves change the behavior around
+them (a floor/target tuned against the old tent-everywhere model may be wrong under the new one).
+
+Use and extend the existing harness — `tools/weight_lab.py` already drives the real engine and
+shipped presets, prints each candidate's closeness per preset (★ winner / "drop" = floored or
+gap-cut), and writes a timestamped report to `reports/`. Extend it to:
+
+- Run every scenario through the **new pipeline** (transition gate → per-profile pick), showing
+  for each preset: which candidates the gate drops (and the rule that dropped them), the slight/
+  much/same classification of each, and the final ACT/HOLD vs the current file.
+- Cover, per preset, the cases the user called out:
+  - bigger file, same resolution, no score increase → must be ❌ (all profiles);
+  - smaller file, *much* lower score → ❌; smaller file, *slightly* lower score → ✅ for
+    size-leaners, ❌ for Remux;
+  - lower score, bigger file, same resolution → ❌;
+  - **much-smaller, lower-score current file**: confirm Efficient/Balanced/Compact do *not*
+    inflate size, and Remux/Quality *do* move up toward `ideal_gbh`.
+- Assert the **no-oscillation property** on the real presets: for random A/B pairs there is no
+  profile where both A→B and B→A are accepted (this also checks `score_much > score_slack`
+  holds with the shipped numbers).
+- Sweep each threshold (`score_slack`, `score_much`, `size_slack`, the floors/targets) across a
+  small range and record where picks flip, so the shipped defaults are chosen from data, not
+  guessed. Land the chosen values in `defaults.toml` and the rationale in the `reports/` file.
+
+Where possible, validate against a **real Radarr/Sonarr release pool** (a `dry_run = true` run,
+or captured `GET /api/v3/release` payloads) rather than only synthetic scenarios, so the floors
+and bloats are checked against real-world bitrates.
 
 ## Resolved (this round)
 
