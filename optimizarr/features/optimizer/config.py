@@ -1,8 +1,14 @@
 """Optimizer feature configuration: schema + parsing of the [optimizer] TOML section.
 
-Tuning values (presets, size curves, anchors) come from the merged config (defaults.toml +
-the user's config.toml) — there are no magic defaults baked into this module. The shared
-loader (optimizarr.config) delegates to parse_optimizer() here.
+Tuning values (the shared size reference, presets, transition rules, score anchors) come from
+the merged config (defaults.toml + the user's config.toml) — there are no magic defaults baked
+into this module. The shared loader (optimizarr.config) delegates to parse_optimizer() here.
+
+Size model: one objective `[reference]` per resolution gives `{floor, target, ceiling}` GiB/h,
+shared by every profile. Each preset only carries a *relative* `size_aim` (fraction of target,
+where its one-sided size curve plateaus) plus its TOPSIS weights, a `pick` method, and a
+`transitions` rule set (which moves from the current file are legal). See
+docs/condition-matrix-design.md.
 """
 
 from __future__ import annotations
@@ -12,24 +18,55 @@ from dataclasses import dataclass, field
 from optimizarr.config import RADARR_RELEASE_TYPES, SONARR_RELEASE_TYPES
 
 PICK_ORDERS = {"random", "ordered"}
+PICK_METHODS = {"topsis", "max_score", "min_size"}
+
+
+@dataclass
+class Transitions:
+    """Per-profile rule set deciding which moves from the current file are legal. Magnitudes are
+    on normalized/relative scales (see classify() in transitions.py). The universal forbidden
+    moves are hard-coded; these flags express the per-profile differences."""
+
+    score_slack: float  # |Δn_score| within this = "same" (noise band)
+    score_much: float  # |Δn_score| beyond this = "much" higher/lower (MUST exceed score_slack)
+    size_slack: float  # |relative size delta| within this = "same"
+    size_much: float  # relative size delta beyond this = "much" smaller/bigger
+    allow_bigger_for_score: bool  # may a bigger file be accepted for a higher score?
+    bigger_needs_much_score: bool  # if so, must the gain clear score_much (vs any higher)?
+    accept_score_drop: bool  # may a slightly-lower-score release be accepted at all?
+    slight_drop_needs_much_smaller: bool  # if so, only when it is *much* smaller?
+    accept_much_lower_score: bool  # may a much-lower-score release be accepted (Compact)?
+    viability_score: int  # floor below which score drops are never accepted
 
 
 @dataclass
 class Preset:
-    """A named bundle: TOPSIS weights + a per-resolution size tent {floor, target, bloat}."""
+    """A named bundle: TOPSIS weights + a relative size aim + a pick method + transition rules."""
 
     weights: dict[str, float]  # keys: score, resolution, size (sum 1.0)
-    # resolution -> (floor, target, bloat) GB/h. target == floor degenerates to a cost curve.
-    size_by_resolution: dict[int, tuple[float, float, float]]
+    size_aim: float  # fraction of reference target where n_size stops being 1.0 (one-sided)
+    pick: str  # "topsis" | "max_score" | "min_size"
+    transitions: Transitions
 
 
 @dataclass
 class ProfileOverride:
-    """Exact-name override: reference a preset, or give explicit weights / size curve."""
+    """Exact-name override: reference a preset, or override its weights / size_aim / pick."""
 
     preset: str | None = None
     weights: dict[str, float] | None = None
-    size_by_resolution: dict[int, tuple[float, float, float]] | None = None
+    size_aim: float | None = None
+    pick: str | None = None
+
+
+@dataclass
+class ResolvedProfile:
+    """Everything the picker needs for one profile, after preset + override resolution."""
+
+    weights: dict[str, float]
+    size_aim: float
+    pick: str
+    transitions: Transitions
 
 
 @dataclass
@@ -39,8 +76,9 @@ class TopsisConfig:
     resolution_ideal: int
     resolution_anti_ideal: int
     score_gap: float
-    min_closeness_gain: float
     default_preset: str
+    # resolution -> (floor, target, ceiling) GiB/h, shared by all profiles.
+    reference: dict[int, tuple[float, float, float]]
     presets: dict[str, Preset]
     profiles: dict[str, ProfileOverride] = field(default_factory=dict)
 
@@ -97,43 +135,89 @@ def _weights(raw: dict, where: str) -> dict[str, float]:
     return w
 
 
-def _size_curve(raw: dict, where: str) -> dict[int, tuple[float, float, float]]:
+def _reference(raw: dict, where: str) -> dict[int, tuple[float, float, float]]:
     out: dict[int, tuple[float, float, float]] = {}
     for res, entry in raw.items():
         try:
             res_int = int(res)
         except (TypeError, ValueError) as e:
             raise ValueError(f"{where}: key {res!r} is not an integer resolution") from e
-        if not isinstance(entry, dict) or not {"floor", "target", "bloat"} <= entry.keys():
-            raise ValueError(f"{where}.{res}: expected {{floor, target, bloat}}, got {entry!r}")
+        if not isinstance(entry, dict) or not {"floor", "target", "ceiling"} <= entry.keys():
+            raise ValueError(f"{where}.{res}: expected {{floor, target, ceiling}}, got {entry!r}")
         floor = float(entry["floor"])
         target = float(entry["target"])
-        bloat = float(entry["bloat"])
-        if bloat <= floor:
-            raise ValueError(f"{where}.{res}: bloat ({bloat}) must exceed floor ({floor})")
-        if not (floor <= target <= bloat):
+        ceiling = float(entry["ceiling"])
+        if not (floor < target <= ceiling):
             raise ValueError(
-                f"{where}.{res}: target ({target}) must satisfy floor <= target <= bloat"
+                f"{where}.{res}: must satisfy floor < target <= ceiling, "
+                f"got floor={floor} target={target} ceiling={ceiling}"
             )
-        out[res_int] = (floor, target, bloat)
+        out[res_int] = (floor, target, ceiling)
+    if not out:
+        raise ValueError(f"{where} is empty (defaults.toml should define it)")
     return out
+
+
+def _transitions(raw: dict, where: str) -> Transitions:
+    def num(key: str, default: float) -> float:
+        return float(raw.get(key, default))
+
+    def flag(key: str, default: bool) -> bool:
+        return bool(raw.get(key, default))
+
+    score_slack = num("score_slack", 0.02)
+    score_much = num("score_much", 0.10)
+    size_slack = num("size_slack", 0.03)
+    size_much = num("size_much", 0.30)
+    if score_much <= score_slack:
+        raise ValueError(
+            f"{where}: score_much ({score_much}) must exceed score_slack ({score_slack}) — "
+            f"this inequality is what guarantees no two-file oscillation"
+        )
+    if size_much <= size_slack:
+        raise ValueError(f"{where}: size_much ({size_much}) must exceed size_slack ({size_slack})")
+    return Transitions(
+        score_slack=score_slack,
+        score_much=score_much,
+        size_slack=size_slack,
+        size_much=size_much,
+        allow_bigger_for_score=flag("allow_bigger_for_score", True),
+        bigger_needs_much_score=flag("bigger_needs_much_score", True),
+        accept_score_drop=flag("accept_score_drop", True),
+        slight_drop_needs_much_smaller=flag("slight_drop_needs_much_smaller", False),
+        accept_much_lower_score=flag("accept_much_lower_score", False),
+        viability_score=int(raw.get("viability_score", 0)),
+    )
+
+
+def _parse_pick(raw: dict, where: str) -> str:
+    pick = str(raw.get("pick", "topsis"))
+    if pick not in PICK_METHODS:
+        raise ValueError(f"{where}.pick={pick!r} not in {sorted(PICK_METHODS)}")
+    return pick
+
+
+def _parse_size_aim(value: object, where: str) -> float:
+    aim = float(value)
+    if not (0.0 < aim <= 1.0):
+        raise ValueError(f"{where}.size_aim must satisfy 0 < size_aim <= 1.0, got {aim}")
+    return aim
 
 
 def _parse_preset(raw: dict, where: str) -> Preset:
     return Preset(
         weights=_weights(raw, where),
-        size_by_resolution=_size_curve(raw.get("size_by_resolution", {}), f"{where}.size"),
+        size_aim=_parse_size_aim(raw.get("size_aim", 1.0), where),
+        pick=_parse_pick(raw, where),
+        transitions=_transitions(raw.get("transitions", {}), f"{where}.transitions"),
     )
 
 
 def _parse_profile_override(raw: dict, where: str) -> ProfileOverride:
     weights = _weights(raw["weights"], f"{where}.weights") if "weights" in raw else None
-    size = (
-        _size_curve(raw["size_by_resolution"], f"{where}.size_by_resolution")
-        if "size_by_resolution" in raw
-        else None
-    )
-    return ProfileOverride(preset=raw.get("preset"), weights=weights, size_by_resolution=size)
+    size_aim = _parse_size_aim(raw["size_aim"], where) if "size_aim" in raw else None
+    pick = _parse_pick(raw, where) if "pick" in raw else None
+    return ProfileOverride(preset=raw.get("preset"), weights=weights, size_aim=size_aim, pick=pick)
 
 
 def _parse_topsis(raw: dict) -> TopsisConfig:
@@ -158,8 +242,8 @@ def _parse_topsis(raw: dict) -> TopsisConfig:
         resolution_ideal=int(raw["resolution_ideal"]),
         resolution_anti_ideal=int(raw["resolution_anti_ideal"]),
         score_gap=float(raw["score_gap"]),
-        min_closeness_gain=float(raw["min_closeness_gain"]),
         default_preset=default_preset,
+        reference=_reference(raw.get("reference", {}), "optimizer.topsis.reference"),
         presets=presets,
         profiles=profiles,
     )

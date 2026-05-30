@@ -148,6 +148,44 @@ def test_rejects_unknown_preset_in_profile_override(monkeypatch, tmp_path):
         load_config(path)
 
 
+def test_rejects_score_much_not_above_slack(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(
+        tmp_path,
+        "[optimizer.topsis.presets.Efficient.transitions]\nscore_slack = 0.1\nscore_much = 0.05\n",
+    )
+    with pytest.raises(ValueError, match="score_much"):
+        load_config(path)
+
+
+def test_rejects_size_aim_out_of_range(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, "[optimizer.topsis.presets.Efficient]\nsize_aim = 1.5\n")
+    with pytest.raises(ValueError, match="size_aim"):
+        load_config(path)
+
+
+def test_rejects_unknown_pick_method(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, '[optimizer.topsis.presets.Efficient]\npick = "lottery"\n')
+    with pytest.raises(ValueError, match="pick"):
+        load_config(path)
+
+
+def test_rejects_reference_target_above_ceiling(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(
+        tmp_path,
+        '[optimizer.topsis.reference]\n"2160" = { floor = 3, target = 20, ceiling = 18 }\n',
+    )
+    with pytest.raises(ValueError, match="floor < target <= ceiling"):
+        load_config(path)
+
+
 def test_optimizer_app_age_gate_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
@@ -279,8 +317,15 @@ def test_parses_topsis_presets_and_overrides(monkeypatch, tmp_path):
     assert t.score_gap == 0.30
     # shipped presets survive the deep-merge
     assert {"Remux", "Quality", "Balanced", "Efficient", "Compact"} <= set(t.presets)
-    assert t.presets["Compact"].weights["size"] == 0.65
-    assert t.presets["Quality"].size_by_resolution[2160] == (4.0, 10.0, 50.0)
+    assert t.presets["Compact"].weights["size"] == 0.70
+    assert t.presets["Compact"].pick == "min_size"
+    assert t.presets["Efficient"].size_aim == 0.65
+    # shared size reference (not per-preset)
+    assert t.reference[2160] == (3.0, 6.5, 18.0)
+    # transition rules per preset
+    assert t.presets["Remux"].transitions.accept_score_drop is False
+    assert t.presets["Quality"].transitions.slight_drop_needs_much_smaller is True
+    assert t.presets["Compact"].transitions.allow_bigger_for_score is False
     # overrides parse as preset-ref or explicit weights
     assert t.profiles["2160p Remux"].preset == "Remux"
     custom_weights = t.profiles["Custom 1080p"].weights
