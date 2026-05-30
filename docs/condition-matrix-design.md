@@ -400,20 +400,84 @@ shipped `size_by_resolution` targets:
 
 Takeaways to fold into the validation sweep:
 
-- The **2160p Efficient target (4 GiB/h ≈ 9.4 Mbps)** is the main suspect — it's at/under the
-  low end of real "good" 4K HEVC; with the new *monotonic* curve (smaller always wins) this is
-  less harmful than under a tent, but confirm it doesn't make Efficient grab visibly-soft 4K
-  encodes. Candidate bump: target ~5–6.
-- **HDR runs ~10–20% higher bitrate** at the same quality; the curves don't distinguish HDR, so
-  HDR 4K encodes sit higher on the cost curve. Note as a known limitation; a per-HDR curve is
-  out of scope for now.
+- The shipped **2160p Efficient target (4 GiB/h ≈ 9.4 Mbps)** sat at/under the low end of real
+  "good" 4K HEVC — corrected in the HDR-baked ladder below (target 7 GiB/h ≈ 17 Mbps).
+- **HDR is now assumed everywhere** (this user watches HDR almost exclusively) — the ladder
+  below bakes a ~25% HDR premium into every target/floor instead of treating HDR as a separate
+  case. See [HDR-baked target ladder](#hdr-baked-target-ladder-proposed-new-defaults).
 - Remux floors/targets and the 1080p encode tiers are **well-supported by the data** — no change
   indicated beyond what the sweep confirms.
 
 Sources: [UHD/4K remux bitrates (Hacker News)](https://news.ycombinator.com/item?id=39337834),
 [1080p Blu-ray/remux bitrates (Linus Tech Tips)](https://linustechtips.com/topic/1059408-dvdbluray-resolutions-and-bitrates/),
 [x265 4K & 1080p encoding bitrates (arstech)](https://arstech.net/video-encoding-bitrates-for-4k-and-1080p-with-h-264-and-h-265/),
-[HEVC bitrate guidance (Plex forum)](https://forums.plex.tv/t/is-there-a-standard-bitrate-that-is-recommended-for-hevc-h265-in-720p-1080p-and-4k/203849).
+[HEVC bitrate guidance (Plex forum)](https://forums.plex.tv/t/is-there-a-standard-bitrate-that-is-recommended-for-hevc-h265-in-720p-1080p-and-4k/203849),
+[4K HDR x265 encoding settings (Code Calamity)](https://codecalamity.com/encoding-settings-for-hdr-4k-videos-using-10-bit-x265/),
+[1080p HDR vs SDR bitrate premium (arstech)](https://arstech.net/video-encoding-bitrates-for-4k-and-1080p-with-h-264-and-h-265/).
+
+### HDR-baked target ladder (proposed new defaults)
+
+**Assumption: every release is HDR (HDR10/10-bit).** This library is watched almost entirely in
+HDR, so rather than carry a separate SDR/HDR curve, the targets below bake in a **~25% HDR
+premium** (HDR10's 10-bit depth needs ~20–30% more bitrate than SDR for the same quality; for
+4K that also lines up with the commonly cited "+1–5 Mbps for HDR"). An SDR release will simply
+read ~20% "lighter" than its tier and rank as smaller — harmless for the size-leaning profiles,
+and for the Remux/Quality tents it lands just left of the peak (acceptable). 480p stays SDR
+(HDR at 480p is not a thing).
+
+Unit is GiB/h (`GB = 1024³`); `1 Mbps ≈ 0.42 GiB/h`. Mbps shown for reference only.
+
+| Preset | Res | floor | target | bloat | target in Mbps (HDR) |
+| --- | --- | --- | --- | --- | --- |
+| **Remux** | 2160 | 15 | 24 | 60 | ~57 |
+| | 1080 | 7 | 10 | 25 | ~24 |
+| | 720 | 2.5 | 4 | 18 | ~9.5 |
+| **Quality** | 2160 | 9 | 13 | 30 | ~31 |
+| | 1080 | 3.5 | 5 | 14 | ~12 |
+| | 720 | 1.0 | 2.2 | 10 | ~5.2 |
+| **Efficient** | 2160 | 5 | 7 | 18 | ~17 |
+| | 1080 | 2.0 | 3 | 10 | ~7.2 |
+| | 720 | 0.5 | 1.0 | 5 | ~2.4 |
+| **Balanced** | 2160 | 4 | 5.5 | 22 | ~13 |
+| | 1080 | 1.6 | 2.4 | 13 | ~5.7 |
+| | 720 | 0.45 | 0.8 | 7 | ~1.9 |
+| **Compact** | 2160 | 3.5 | 3.5 | 14 | ~8.3 |
+| | 1080 | 1.3 | 1.3 | 6 | ~3.1 |
+| | 720 | 0.4 | 0.4 | 4 | ~1.0 |
+
+Notes:
+
+- **Floors are ordered** so each profile only sees its own tier of release:
+  Compact < Balanced < Efficient < Quality < Remux at every resolution. A Quality-grade 4K HDR
+  encode (~13 GiB/h) falls *below* the Remux floor (15), so it can't masquerade as a remux.
+- For the **monotonic** presets (Efficient/Balanced/Compact) `target` is informational — the
+  curve falls from floor→bloat and smaller always wins; the meaningful knob there is the
+  **floor** (fake/too-soft cut) and the TOPSIS size weight. `target` matters as the tent peak
+  only for **Remux/Quality**.
+- 2160 anchors: Remux target ~57 Mbps (lean end of 60–100 Mbps UHD HDR remux); Quality ~31 Mbps
+  (near-transparent 4K HDR encode); Efficient ~17 Mbps (good 10-bit x265); Compact floor
+  ~8 Mbps (lowest 4K HDR that still holds up before banding).
+- These are the **sweep's starting points**, not frozen — the validation step confirms/curves
+  them against a real HDR release pool, then they land in `defaults.toml`.
+
+Ready-to-paste `size_by_resolution` (480p kept SDR from current defaults):
+
+```toml
+[optimizer.topsis.presets.Remux]
+size_by_resolution = { "480" = { floor = 0.4, target = 1.5, bloat = 10 }, "720" = { floor = 2.5, target = 4.0, bloat = 18 }, "1080" = { floor = 7.0, target = 10.0, bloat = 25 }, "2160" = { floor = 15.0, target = 24.0, bloat = 60 } }
+
+[optimizer.topsis.presets.Quality]
+size_by_resolution = { "480" = { floor = 0.2, target = 0.8, bloat = 6 }, "720" = { floor = 1.0, target = 2.2, bloat = 10 }, "1080" = { floor = 3.5, target = 5.0, bloat = 14 }, "2160" = { floor = 9.0, target = 13.0, bloat = 30 } }
+
+[optimizer.topsis.presets.Efficient]
+size_by_resolution = { "480" = { floor = 0.2, target = 0.35, bloat = 3 }, "720" = { floor = 0.5, target = 1.0, bloat = 5 }, "1080" = { floor = 2.0, target = 3.0, bloat = 10 }, "2160" = { floor = 5.0, target = 7.0, bloat = 18 } }
+
+[optimizer.topsis.presets.Balanced]
+size_by_resolution = { "480" = { floor = 0.2, target = 0.5, bloat = 4 }, "720" = { floor = 0.45, target = 0.8, bloat = 7 }, "1080" = { floor = 1.6, target = 2.4, bloat = 13 }, "2160" = { floor = 4.0, target = 5.5, bloat = 22 } }
+
+[optimizer.topsis.presets.Compact]
+size_by_resolution = { "480" = { floor = 0.2, target = 0.2, bloat = 2 }, "720" = { floor = 0.4, target = 0.4, bloat = 4 }, "1080" = { floor = 1.3, target = 1.3, bloat = 6 }, "2160" = { floor = 3.5, target = 3.5, bloat = 14 } }
+```
 
 ## Resolved (this round)
 
