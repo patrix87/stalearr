@@ -4,7 +4,7 @@ Items are episodes. Series metadata (title, runtime, quality profile) is fetched
 listing and cached, since episodes reference it by seriesId.
 """
 
-from optimizarr.arr.base import ArrApi
+from optimizarr.arr.base import RELEASE_SEARCH_TIMEOUT_SEC, ArrApi
 from optimizarr.config import Connection
 
 
@@ -66,7 +66,12 @@ class SonarrApi(ArrApi):
         return self.client.get(f"/api/v3/episodefile/{file_id}")
 
     def releases(self, item: dict) -> list[dict]:
-        return self.client.get(f"/api/v3/release?episodeId={item['id']}") or []
+        return (
+            self.client.get(
+                f"/api/v3/release?episodeId={item['id']}", timeout=RELEASE_SEARCH_TIMEOUT_SEC
+            )
+            or []
+        )
 
     def set_monitored(self, item_ids: list[int], monitored: bool) -> None:
         self.client.put(

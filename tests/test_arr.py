@@ -1,4 +1,5 @@
 from optimizarr.arr import RadarrApi, SonarrApi, build_client, max_allowed_resolution
+from optimizarr.arr.base import RELEASE_SEARCH_TIMEOUT_SEC
 from optimizarr.config import Connection
 from optimizarr.http import ArrClient
 
@@ -73,14 +74,19 @@ def test_sonarr_current_file_id_fallback():
 
 
 class _RecordingClient(ArrClient):
-    """Captures the single POST a manual_import makes."""
+    """Captures the GET/POST calls an adapter makes (path, timeout, retry)."""
 
     def __init__(self):
         self.posts: list[tuple] = []
+        self.gets: list[tuple] = []
 
     def post(self, path, body, *, timeout=None, retry=True):
         self.posts.append((path, body, timeout, retry))
         return None
+
+    def get(self, path, *, timeout=None, retry=True):
+        self.gets.append((path, timeout, retry))
+        return []
 
 
 def test_radarr_manual_import_posts_command_with_movie_id():
@@ -137,3 +143,26 @@ def test_sonarr_manual_import_posts_command_with_series_and_episode_ids():
     assert file["seriesId"] == 12
     assert file["episodeIds"] == [501, 502]
     assert file["downloadId"] == "def456"
+
+
+def test_radarr_releases_uses_generous_search_timeout():
+    # The interactive indexer search routinely runs 45-100s; it must not use the 30s default.
+    api = RadarrApi(_conn())
+    client = _RecordingClient()
+    api.client = client
+    api.releases({"id": 422})
+
+    (path, timeout, _) = client.gets[0]
+    assert path == "/api/v3/release?movieId=422"
+    assert timeout == RELEASE_SEARCH_TIMEOUT_SEC
+
+
+def test_sonarr_releases_uses_generous_search_timeout():
+    api = SonarrApi(_conn("sonarr"))
+    client = _RecordingClient()
+    api.client = client
+    api.releases({"id": 7})
+
+    (path, timeout, _) = client.gets[0]
+    assert path == "/api/v3/release?episodeId=7"
+    assert timeout == RELEASE_SEARCH_TIMEOUT_SEC

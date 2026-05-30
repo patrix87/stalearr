@@ -1,3 +1,4 @@
+import logging
 import threading
 from datetime import UTC, datetime
 
@@ -15,6 +16,7 @@ from optimizarr.features.optimizer.worker import (
     _is_score_regression,
     age_ok,
 )
+from optimizarr.http import ArrTimeout
 
 NOW = datetime(2026, 5, 28, tzinfo=UTC)
 
@@ -292,6 +294,36 @@ def test_process_one_dry_run_does_not_grab(tmp_path):
     _worker(state, dry_run=True)._process_one(_ctx(adapter), 1)
     assert adapter.grabbed == []
     assert state.get("radarr", 1) is None
+
+
+def test_process_app_once_downgrades_search_timeout_to_warning(tmp_path, caplog):
+    # A slow interactive indexer search (ArrTimeout) must be handled gracefully: logged as a
+    # concise WARNING (not an ERROR traceback), the item left in `evaluated` for a later pass,
+    # and never marked satisfied.
+    state = StateManager(str(tmp_path / "s.json"))
+    w = _worker(state)
+
+    class _TimeoutAdapter(_ProcessAdapter):
+        def queue_items(self):
+            return []
+
+        def releases(self, item):
+            raise ArrTimeout("GET /api/v3/release?movieId=1 timed out after 240s")
+
+    adapter = _TimeoutAdapter(releases=[], current_file=None)
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=False))
+    ctx.items_by_id = {1: {"id": 1}}
+    ctx.pool = [1]
+    ctx.last_refresh = datetime.now(UTC)  # keep needs_refresh() False
+
+    with caplog.at_level(logging.WARNING):
+        handled = w._process_app_once(ctx)
+
+    assert handled is True  # work was attempted; loop continues, no crash
+    assert 1 in ctx.evaluated  # retained for retry on the next pass
+    assert state.get("radarr", 1) is None  # NOT marked satisfied
+    assert any("will retry on a later pass" in r.getMessage() for r in caplog.records)
+    assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
 
 def test_build_pool_holds_progress_across_refresh_then_resets(tmp_path):

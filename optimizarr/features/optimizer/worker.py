@@ -29,6 +29,7 @@ from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerCo
 from optimizarr.features.optimizer.decision import decide, format_decision
 from optimizarr.features.optimizer.state import StateManager
 from optimizarr.features.optimizer.topsis import Topsis
+from optimizarr.http import ArrTimeout
 
 logger = logging.getLogger("optimizarr")
 
@@ -391,6 +392,11 @@ class OptimizerWorker:
         ctx.evaluated.add(item_id)  # don't re-pick within this refresh cycle
         try:
             self._process_one(ctx, item_id)
+        except ArrTimeout as e:
+            # Expected for slow interactive indexer searches: the item is already in
+            # `evaluated`, so it's simply re-evaluated on the next full pass. Not a failure —
+            # a concise warning, not an ERROR traceback.
+            logger.warning("[%s] id=%d: %s; will retry on a later pass", adapter.app, item_id, e)
         except Exception:
             logger.exception("[%s] failed to process id=%d", adapter.app, item_id)
         return True

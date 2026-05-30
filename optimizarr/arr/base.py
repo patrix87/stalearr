@@ -19,6 +19,12 @@ from optimizarr.http import ArrClient
 # bandwidth — used to filter "active" queue items vs. ones stuck waiting for/in import.
 QUEUE_INACTIVE_STATES = {"importPending", "importing", "imported", "importBlocked"}
 
+# GET /api/v3/release?movieId=/episodeId= runs a *live* interactive indexer search and only
+# returns once every indexer has answered or timed out — measured at 45-100s in the field,
+# well past the 30s default. Give it a generous ceiling so a normal slow search isn't logged
+# as a failure; a search that truly exceeds this still fails cleanly and the item is retried.
+RELEASE_SEARCH_TIMEOUT_SEC = 240
+
 
 def max_allowed_resolution(profile_items: list[dict]) -> int:
     """Max `resolution` over allowed entries in a Radarr/Sonarr quality profile's

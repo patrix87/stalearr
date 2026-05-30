@@ -23,6 +23,12 @@ _TRANSIENT_REASONS = (
 )
 
 
+class ArrTimeout(RuntimeError):
+    """The server accepted the connection but didn't respond within the timeout (e.g. a slow
+    interactive indexer search). Distinct from a hard failure so callers can treat it as an
+    expected, retry-later condition rather than an error."""
+
+
 def _is_transient(exc: URLError) -> bool:
     return isinstance(exc.reason, _TRANSIENT_REASONS)
 
@@ -67,6 +73,11 @@ class ArrClient:
             except HTTPError as e:
                 detail = e.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"{method} {url} -> HTTP {e.code}: {detail}") from e
+            except TimeoutError as e:
+                # Read-phase timeout (connection made, no response in time). Raised bare, not
+                # wrapped in URLError, so it needs its own clause. Don't retry — retrying a
+                # slow-by-nature endpoint just compounds latency.
+                raise ArrTimeout(f"{method} {url} timed out after {effective_timeout}s") from e
             except URLError as e:
                 if attempt < attempts and _is_transient(e):
                     delay = CONNECT_RETRY_DELAYS_SEC[attempt - 1]

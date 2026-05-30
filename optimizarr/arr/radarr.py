@@ -1,6 +1,6 @@
 """RadarrApi: Radarr (movies) implementation of ArrApi."""
 
-from optimizarr.arr.base import ArrApi
+from optimizarr.arr.base import RELEASE_SEARCH_TIMEOUT_SEC, ArrApi
 
 
 class RadarrApi(ArrApi):
@@ -40,7 +40,12 @@ class RadarrApi(ArrApi):
         return self.client.get(f"/api/v3/movieFile/{file_id}")
 
     def releases(self, item: dict) -> list[dict]:
-        return self.client.get(f"/api/v3/release?movieId={item['id']}") or []
+        return (
+            self.client.get(
+                f"/api/v3/release?movieId={item['id']}", timeout=RELEASE_SEARCH_TIMEOUT_SEC
+            )
+            or []
+        )
 
     def set_monitored(self, item_ids: list[int], monitored: bool) -> None:
         self.client.put(

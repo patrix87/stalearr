@@ -4,7 +4,7 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from optimizarr import http
-from optimizarr.http import ArrClient
+from optimizarr.http import ArrClient, ArrTimeout
 
 
 class _FakeResponse:
@@ -66,5 +66,23 @@ def test_http_errors_do_not_retry():
         pytest.raises(RuntimeError, match="HTTP 401"),
     ):
         ArrClient("http://x", "k").get("/foo")
+
+    assert len(attempts) == 1
+
+
+def test_read_timeout_raises_arrtimeout_without_retry():
+    # A read-phase timeout (bare TimeoutError, not wrapped in URLError) becomes ArrTimeout and
+    # must not retry — retrying a slow endpoint just compounds latency.
+    attempts = []
+
+    def fake_urlopen(req, timeout):
+        attempts.append(1)
+        raise TimeoutError("timed out")
+
+    with (
+        patch.object(http, "urlopen", fake_urlopen),
+        pytest.raises(ArrTimeout, match="timed out after"),
+    ):
+        ArrClient("http://x", "k").get("/foo", timeout=240)
 
     assert len(attempts) == 1
