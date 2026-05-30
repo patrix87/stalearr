@@ -19,6 +19,7 @@ app-agnostic.
 
 import logging
 import threading
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from optimizarr.arr import ArrApi, build_client
@@ -31,13 +32,77 @@ from optimizarr.features.optimizer.topsis import Topsis
 
 logger = logging.getLogger("optimizarr")
 
-# Score-regression marker — case-insensitive substring covers both
-# "Not an upgrade for existing movie file(s)" and
-# "Not a Custom Format upgrade for existing movie file(s)" (and Sonarr's episode variants).
-# Anything OTHER than this in statusMessages (executable / archive file / sample / mediainfo
-# mismatch) is left untouched by auto-import — those categories will get a separate handler
-# once we've seen real-world examples.
-_SCORE_REGRESSION_MARKER = "not an upgrade"
+# Score-regression marker — case-insensitive substring. Covers every phrasing observed
+# in live Radarr/Sonarr v3 queues:
+#   - "Not an upgrade for existing movie file(s)" (older Radarr)
+#   - "Not a Custom Format upgrade for existing movie file(s). New: [...] do not improve
+#     on Existing: [...]" (current Radarr)
+#   - Sonarr's "episode file(s)" variants of both.
+# The invariant substring across all of them is "upgrade for existing". Anything OTHER
+# than this in statusMessages (executable / archive file / sample / mediainfo mismatch)
+# is left untouched by auto-import — those get a separate handler later.
+_SCORE_REGRESSION_MARKER = "upgrade for existing"
+
+# Auto-import: the manualimport endpoint runs MediaInfo and can take 30-120s per file on
+# first call per downloadId, then caches. We give it a generous timeout and disable retry
+# so a single failure doesn't compound into minutes of backoff blocking the slot.
+_MANUAL_IMPORT_TIMEOUT_SEC = 300
+# A downloadId that has failed this many times this session is skipped to stop us from
+# burning the 5-min timeout on a permanently broken record every tick. Counter is in-memory
+# only — a worker restart gives every record a clean slate.
+_MANUAL_IMPORT_MAX_FAILS = 3
+
+
+class _ImportSlot:
+    """Single-slot per-app coordinator for manualimport calls.
+
+    Spawns a daemon thread for each call so the worker's main loop isn't blocked by
+    Radarr/Sonarr's slow MediaInfo parses. While a thread is alive, the slot is busy
+    and the caller skips the tick. Per-downloadId failure counts let us stop retrying
+    a broken record forever (cleared only on worker restart).
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._fail_counts: dict[str, int] = {}
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self._thread is not None and self._thread.is_alive()
+
+    def should_skip(self, download_id: str) -> bool:
+        return self._fail_counts.get(download_id, 0) >= _MANUAL_IMPORT_MAX_FAILS
+
+    def submit(self, download_id: str, target: Callable[[], bool]) -> bool:
+        """Spawn target() in a daemon thread if the slot is free. target() returns True on
+        success. Returns True if spawned, False if already busy."""
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return False
+            self._thread = threading.Thread(
+                target=self._run, args=(target, download_id), daemon=True
+            )
+            self._thread.start()
+            return True
+
+    def _run(self, target: Callable[[], bool], download_id: str) -> None:
+        try:
+            ok = target()
+        except Exception:
+            logger.exception("[manualimport] worker thread crashed for downloadId=%s", download_id)
+            ok = False
+        if ok:
+            self._fail_counts.pop(download_id, None)
+        else:
+            self._fail_counts[download_id] = self._fail_counts.get(download_id, 0) + 1
+            if self._fail_counts[download_id] >= _MANUAL_IMPORT_MAX_FAILS:
+                logger.warning(
+                    "[manualimport] downloadId=%s reached %d failures; skipping for the "
+                    "remainder of this session",
+                    download_id,
+                    _MANUAL_IMPORT_MAX_FAILS,
+                )
 
 
 def age_ok(api: ArrApi, item: dict, app_cfg: OptimizerAppConfig, now: datetime) -> bool:
@@ -55,7 +120,8 @@ def age_ok(api: ArrApi, item: dict, app_cfg: OptimizerAppConfig, now: datetime) 
 
 
 class _AppContext:
-    """Per-app worker state: client, its config, cached item list, active pool."""
+    """Per-app worker state: client, its config, cached item list, active pool, and the
+    single-slot manualimport coordinator (one in-flight downgrade-import per app)."""
 
     def __init__(self, adapter: ArrApi, app_cfg: OptimizerAppConfig):
         self.adapter = adapter
@@ -64,6 +130,7 @@ class _AppContext:
         self.pool: list[int] = []
         self.evaluated: set[int] = set()
         self.last_refresh: datetime | None = None
+        self.import_slot = _ImportSlot()
 
     def needs_refresh(self, now: datetime, list_refresh_minutes: int) -> bool:
         if self.last_refresh is None:
@@ -171,10 +238,17 @@ class OptimizerWorker:
             adapter.grab(decision.release or {})
 
     def _handle_queue_imports(self, ctx: _AppContext) -> None:
-        """Scan the queue for completed items rejected solely on score regression and push
-        them through manualimport so they actually land. Strict scope — virus/sample/mismatch
-        and anything else with mixed rejections is left for a future, separate flow."""
+        """At most one in-flight manualimport per app per tick.
+
+        The Radarr/Sonarr manualimport endpoint runs MediaInfo and can take minutes per
+        downloadId on first call, so the actual GET/POST runs in a daemon thread via
+        ctx.import_slot. The main loop only looks at the queue here, picks the first
+        matching downgrade that isn't already being handled and hasn't repeatedly failed,
+        and submits it. Strict scope: score-regression rejections only; other categories
+        (virus / sample / mismatch) are left untouched."""
         if not ctx.app_cfg.auto_import_downgrades:
+            return
+        if ctx.import_slot.busy():
             return
         adapter = ctx.adapter
         try:
@@ -183,45 +257,74 @@ class OptimizerWorker:
             logger.exception("[%s] queue fetch failed during auto-import scan", adapter.app)
             return
 
-        for record in records:
-            if not _is_score_regression(record):
-                continue
-            download_id = record.get("downloadId")
-            if not download_id:
-                continue
-            title = record.get("title") or f"queue#{record.get('id')}"
-            if self.dry_run:
-                logger.info(
-                    "[%s] would manual-import (downgrade) %s (downloadId=%s)",
-                    adapter.app,
-                    title,
-                    download_id,
-                )
-                continue
-            try:
-                candidates = adapter.manual_import_candidates(download_id)
-            except Exception:
-                logger.exception("[%s] manualimport GET failed for %s", adapter.app, title)
-                continue
-            importable = [c for c in candidates if _is_importable_downgrade(c)]
-            if not importable:
-                logger.info(
-                    "[%s] no importable candidates for downgrade %s (downloadId=%s); leaving alone",
-                    adapter.app,
-                    title,
-                    download_id,
-                )
-                continue
-            try:
-                adapter.manual_import(importable, import_mode="auto")
-                logger.info(
-                    "[%s] auto-imported downgrade %s (%d file(s))",
-                    adapter.app,
-                    title,
-                    len(importable),
-                )
-            except Exception:
-                logger.exception("[%s] manualimport POST failed for %s", adapter.app, title)
+        target = next(
+            (
+                r
+                for r in records
+                if _is_score_regression(r)
+                and r.get("downloadId")
+                and not ctx.import_slot.should_skip(r["downloadId"])
+            ),
+            None,
+        )
+        if target is None:
+            return
+
+        download_id = target["downloadId"]
+        title = target.get("title") or f"queue#{target.get('id')}"
+        if self.dry_run:
+            logger.info(
+                "[%s] would manual-import (downgrade) %s (downloadId=%s)",
+                adapter.app,
+                title,
+                download_id,
+            )
+            return
+
+        ctx.import_slot.submit(
+            download_id, lambda: self._run_manual_import(adapter, title, download_id)
+        )
+
+    def _run_manual_import(self, adapter: ArrApi, title: str, download_id: str) -> bool:
+        """Inside the spawned daemon thread: GET candidates, filter to importable
+        downgrades, POST manualimport. Returns True on success (including 'no work to do'),
+        False on transport failure so the slot's failure counter ticks up."""
+        try:
+            candidates = adapter.manual_import_candidates(
+                download_id, timeout=_MANUAL_IMPORT_TIMEOUT_SEC, retry=False
+            )
+        except Exception:
+            logger.exception("[%s] manualimport GET failed for %s", adapter.app, title)
+            return False
+
+        importable = [c for c in candidates if _is_importable_downgrade(c)]
+        if not importable:
+            logger.info(
+                "[%s] no importable candidates for downgrade %s (downloadId=%s); leaving alone",
+                adapter.app,
+                title,
+                download_id,
+            )
+            return True
+
+        try:
+            adapter.manual_import(
+                importable,
+                import_mode="auto",
+                timeout=_MANUAL_IMPORT_TIMEOUT_SEC,
+                retry=False,
+            )
+        except Exception:
+            logger.exception("[%s] manualimport POST failed for %s", adapter.app, title)
+            return False
+
+        logger.info(
+            "[%s] auto-imported downgrade %s (%d file(s))",
+            adapter.app,
+            title,
+            len(importable),
+        )
+        return True
 
     def _sleep(self, seconds: float) -> None:
         self._stop.wait(seconds)

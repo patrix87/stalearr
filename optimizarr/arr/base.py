@@ -106,15 +106,37 @@ class ArrApi:
             return False
         return record.get("trackedDownloadState") not in QUEUE_INACTIVE_STATES
 
-    def manual_import_candidates(self, download_id: str) -> list[dict]:
+    def manual_import_candidates(
+        self,
+        download_id: str,
+        *,
+        timeout: int | None = None,
+        retry: bool = True,
+    ) -> list[dict]:
         """List importable files for a downloadId (GET /api/v3/manualimport?downloadId=).
-        Each candidate carries proposed movie/episode, quality, customFormats, rejections."""
-        return self.client.get(f"/api/v3/manualimport?downloadId={quote(download_id)}") or []
+        Each candidate carries proposed movie/episode, quality, customFormats, rejections.
+        Pass a longer `timeout` and `retry=False` for the worker's auto-import sweep —
+        this endpoint runs MediaInfo and can take minutes on first call per downloadId."""
+        return (
+            self.client.get(
+                f"/api/v3/manualimport?downloadId={quote(download_id)}",
+                timeout=timeout,
+                retry=retry,
+            )
+            or []
+        )
 
-    def manual_import(self, items: list[dict], import_mode: str = "auto") -> None:
+    def manual_import(
+        self,
+        items: list[dict],
+        import_mode: str = "auto",
+        *,
+        timeout: int | None = None,
+        retry: bool = True,
+    ) -> None:
         """POST /api/v3/manualimport with the given candidate items. Same path on both apps."""
         body = [{**it, "importMode": import_mode} for it in items]
-        self.client.post("/api/v3/manualimport", body)
+        self.client.post("/api/v3/manualimport", body, timeout=timeout, retry=retry)
 
     # ----- app-specific (subclasses implement) -----
 

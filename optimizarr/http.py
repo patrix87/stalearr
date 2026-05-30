@@ -32,7 +32,18 @@ class ArrClient:
         self.base_url = base_url
         self.api_key = api_key
 
-    def _request(self, method: str, path: str, body: dict | list | None = None) -> Any:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        body: dict | list | None = None,
+        *,
+        timeout: int | None = None,
+        retry: bool = True,
+    ) -> Any:
+        """`timeout=None` uses the default TIMEOUT_SEC. `retry=False` disables the transient
+        backoff loop — use it for slow-but-responsive endpoints (e.g. manualimport, which
+        runs MediaInfo and can take minutes) where retry-on-timeout just compounds latency."""
         url = f"{self.base_url}{path}"
         headers = {
             "X-Api-Key": self.api_key,
@@ -44,10 +55,11 @@ class ArrClient:
             headers["Content-Type"] = "application/json"
 
         req = Request(url, data=data, headers=headers, method=method)
-        attempts = len(CONNECT_RETRY_DELAYS_SEC) + 1
+        effective_timeout = TIMEOUT_SEC if timeout is None else timeout
+        attempts = (len(CONNECT_RETRY_DELAYS_SEC) + 1) if retry else 1
         for attempt in range(1, attempts + 1):
             try:
-                with urlopen(req, timeout=TIMEOUT_SEC) as response:
+                with urlopen(req, timeout=effective_timeout) as response:
                     raw = response.read()
                     if not raw:
                         return None
@@ -71,11 +83,25 @@ class ArrClient:
                     continue
                 raise RuntimeError(f"{method} {url} failed: {e.reason}") from e
 
-    def get(self, path: str) -> Any:
-        return self._request("GET", path)
+    def get(self, path: str, *, timeout: int | None = None, retry: bool = True) -> Any:
+        return self._request("GET", path, timeout=timeout, retry=retry)
 
-    def put(self, path: str, body: dict | list) -> Any:
-        return self._request("PUT", path, body)
+    def put(
+        self,
+        path: str,
+        body: dict | list,
+        *,
+        timeout: int | None = None,
+        retry: bool = True,
+    ) -> Any:
+        return self._request("PUT", path, body, timeout=timeout, retry=retry)
 
-    def post(self, path: str, body: dict | list) -> Any:
-        return self._request("POST", path, body)
+    def post(
+        self,
+        path: str,
+        body: dict | list,
+        *,
+        timeout: int | None = None,
+        retry: bool = True,
+    ) -> Any:
+        return self._request("POST", path, body, timeout=timeout, retry=retry)

@@ -1,3 +1,4 @@
+import threading
 from datetime import UTC, datetime
 
 from optimizarr.arr import ArrApi, RadarrApi
@@ -6,8 +7,10 @@ from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerCo
 from optimizarr.features.optimizer.state import SATISFIED, StateManager
 from optimizarr.features.optimizer.topsis import GB, Topsis
 from optimizarr.features.optimizer.worker import (
+    _MANUAL_IMPORT_MAX_FAILS,
     OptimizerWorker,
     _AppContext,
+    _ImportSlot,
     _is_importable_downgrade,
     _is_score_regression,
     age_ok,
@@ -120,6 +123,40 @@ def test_is_score_regression_matches_completed_with_marker():
     assert _is_score_regression(record)
 
 
+def test_is_score_regression_matches_live_radarr_custom_format_phrasing():
+    # Verbatim message from a live Radarr v3 queue — the marker must catch this exact
+    # phrasing (the older "Not an upgrade" pattern is no longer what Radarr emits).
+    record = {
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "statusMessages": [
+            {
+                "title": "x",
+                "messages": [
+                    "Not a Custom Format upgrade for existing movie file(s). "
+                    "New: [1080p Bluray] (700300) do not improve on "
+                    "Existing: [1080p Bluray, x265 (Bluray)] (920600)"
+                ],
+            }
+        ],
+    }
+    assert _is_score_regression(record)
+
+
+def test_is_score_regression_matches_sonarr_episode_phrasing():
+    record = {
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "statusMessages": [
+            {
+                "title": "x",
+                "messages": ["Not a Custom Format upgrade for existing episode file(s)."],
+            }
+        ],
+    }
+    assert _is_score_regression(record)
+
+
 def test_is_score_regression_ignores_still_downloading():
     record = {
         "status": "downloading",
@@ -144,11 +181,26 @@ def test_is_importable_downgrade_accepts_no_or_score_only_rejections():
     assert _is_importable_downgrade(
         {"rejections": [{"reason": "Not an upgrade for existing movie file(s)"}]}
     )
+    # Verbatim live-Radarr rejection on the manualimport candidate side — must accept.
+    assert _is_importable_downgrade(
+        {
+            "rejections": [
+                {
+                    "reason": (
+                        "Not a Custom Format upgrade for existing movie file(s). "
+                        "New: [1080p Bluray] (920600) do not improve on "
+                        "Existing: [1080p Bluray, x265 (Bluray)] (923200)"
+                    ),
+                    "type": "permanent",
+                }
+            ]
+        }
+    )
     # Mixed rejections (e.g. sample) -> not importable; needs human review.
     assert not _is_importable_downgrade(
         {
             "rejections": [
-                {"reason": "Not an upgrade"},
+                {"reason": "Not an upgrade for existing movie file(s)"},
                 {"reason": "Sample"},
             ]
         }
@@ -272,18 +324,21 @@ class _QueueAdapter(ArrApi):
     app = "radarr"
     _queue_id_field = "movieId"
 
-    def __init__(self, records, candidates=None):
+    def __init__(self, records, candidates=None, raises=None):
         self._records = records
         self._candidates = candidates or {}
+        self._raises: dict[str, str] = raises or {}
         self.imports: list[tuple[list[dict], str]] = []
 
     def queue_items(self):
         return self._records
 
-    def manual_import_candidates(self, download_id):
+    def manual_import_candidates(self, download_id, *, timeout=None, retry=True):
+        if download_id in self._raises:
+            raise RuntimeError(self._raises[download_id])
         return self._candidates.get(download_id, [])
 
-    def manual_import(self, items, import_mode="auto"):
+    def manual_import(self, items, import_mode="auto", *, timeout=None, retry=True):
         # Record items + mode separately so the test can assert both without coupling to the
         # real method's body-wrapping behavior.
         self.imports.append((list(items), import_mode))
@@ -303,6 +358,13 @@ def _downgrade_record(download_id="dl1", movie_id=42):
     }
 
 
+def _wait_for_slot(ctx, timeout=2.0):
+    """Tests block on the slot's daemon thread so they can assert post-import state."""
+    thread = ctx.import_slot._thread
+    if thread is not None:
+        thread.join(timeout=timeout)
+
+
 def test_handle_queue_imports_force_imports_downgrades(tmp_path):
     state = StateManager(str(tmp_path / "s.json"))
     record = _downgrade_record()
@@ -316,6 +378,7 @@ def test_handle_queue_imports_force_imports_downgrades(tmp_path):
     ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
     w = _worker(state)
     w._handle_queue_imports(ctx)
+    _wait_for_slot(ctx)
     assert adapter.imports == [([candidate], "auto")]
 
 
@@ -328,6 +391,7 @@ def test_handle_queue_imports_dry_run_does_not_post(tmp_path):
     ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
     w = _worker(state, dry_run=True)
     w._handle_queue_imports(ctx)
+    _wait_for_slot(ctx)
     assert adapter.imports == []
 
 
@@ -337,13 +401,14 @@ def test_handle_queue_imports_skips_when_candidates_have_other_rejections(tmp_pa
     candidate = {
         "path": "/downloads/x.mkv",
         "rejections": [
-            {"reason": "Not an upgrade"},
+            {"reason": "Not an upgrade for existing movie file(s)"},
             {"reason": "Sample"},
         ],
     }
     adapter = _QueueAdapter([_downgrade_record()], candidates={"dl1": [candidate]})
     ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
     _worker(state)._handle_queue_imports(ctx)
+    _wait_for_slot(ctx)
     assert adapter.imports == []
 
 
@@ -355,6 +420,100 @@ def test_handle_queue_imports_disabled_is_noop(tmp_path):
     )
     ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=False))
     _worker(state)._handle_queue_imports(ctx)
+    _wait_for_slot(ctx)
+    assert adapter.imports == []
+
+
+def test_handle_queue_imports_skips_when_slot_busy(tmp_path):
+    # If another import is already in flight, the tick is a no-op — no second thread.
+    state = StateManager(str(tmp_path / "s.json"))
+    adapter = _QueueAdapter(
+        [_downgrade_record()],
+        candidates={"dl1": [{"path": "/x.mkv", "rejections": []}]},
+    )
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
+
+    # Occupy the slot with a long-running fake thread.
+    blocker = threading.Event()
+    ctx.import_slot.submit("other", blocker.wait)
+    try:
+        _worker(state)._handle_queue_imports(ctx)
+        # Slot is still the one we set; no new submission.
+        assert adapter.imports == []
+    finally:
+        blocker.set()
+        _wait_for_slot(ctx)
+
+
+def test_handle_queue_imports_skips_downloadid_with_too_many_failures(tmp_path):
+    # A downloadId that has hit _MANUAL_IMPORT_MAX_FAILS is dropped from the candidate
+    # search entirely until worker restart, so the slot stops burning the 5-min timeout
+    # on a permanently broken record.
+    state = StateManager(str(tmp_path / "s.json"))
+    adapter = _QueueAdapter(
+        [_downgrade_record()],
+        candidates={"dl1": [{"path": "/x.mkv", "rejections": []}]},
+    )
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
+    ctx.import_slot._fail_counts["dl1"] = _MANUAL_IMPORT_MAX_FAILS
+    _worker(state)._handle_queue_imports(ctx)
+    _wait_for_slot(ctx)
+    assert adapter.imports == []
+
+
+def test_import_slot_busy_releases_after_target_returns():
+    slot = _ImportSlot()
+    done = threading.Event()
+
+    def target():
+        done.wait(timeout=2)
+        return True
+
+    assert slot.submit("dl1", target)
+    assert slot.busy()
+    # Second submit while busy is a no-op.
+    assert not slot.submit("dl2", lambda: True)
+    done.set()
+    # Wait for the thread to finish so busy() flips back.
+    if slot._thread is not None:
+        slot._thread.join(timeout=2)
+    assert not slot.busy()
+
+
+def test_import_slot_failure_count_increments_and_skip_kicks_in():
+    slot = _ImportSlot()
+    # Run a failing target enough times to hit the skip threshold.
+    for _ in range(_MANUAL_IMPORT_MAX_FAILS):
+        slot.submit("dl1", lambda: False)
+        if slot._thread is not None:
+            slot._thread.join(timeout=2)
+    assert slot.should_skip("dl1")
+    # A different downloadId is unaffected.
+    assert not slot.should_skip("dl2")
+
+
+def test_import_slot_failure_count_resets_on_success():
+    slot = _ImportSlot()
+    slot.submit("dl1", lambda: False)
+    if slot._thread is not None:
+        slot._thread.join(timeout=2)
+    assert slot._fail_counts.get("dl1") == 1
+    slot.submit("dl1", lambda: True)
+    if slot._thread is not None:
+        slot._thread.join(timeout=2)
+    assert "dl1" not in slot._fail_counts
+
+
+def test_run_manual_import_returns_false_on_get_failure(tmp_path):
+    # If the manualimport GET raises, the slot's fail counter must tick up
+    # (via the _run wrapper) by returning False.
+    state = StateManager(str(tmp_path / "s.json"))
+    adapter = _QueueAdapter(
+        records=[_downgrade_record()],
+        raises={"dl1": "simulated timeout"},
+    )
+    w = _worker(state)
+    assert w._run_manual_import(adapter, "Movie (2024)", "dl1") is False
     assert adapter.imports == []
 
 
