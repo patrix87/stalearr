@@ -1,8 +1,11 @@
-# Condition-matrix selection — design plan
+# Condition-matrix selection — design rationale & validation roadmap
 
-> **Status:** proposal / WIP on branch `feature/condition-matrix-selection`.
-> Supersedes parts of [optimizer-design.md](optimizer-design.md). Nothing here is wired up
-> yet — this is the agreed direction before code.
+> **Status:** implemented on branch `feature/condition-matrix-selection`. This document is the
+> *rationale* — why the model is shaped the way it is, the real-world bitrate research behind the
+> size reference, and the remaining tuning/validation work. For the **as-built** algorithm,
+> formulas, and config reference, see [ALGORITHM.md](../ALGORITHM.md); the worked HDR ladder and
+> the validation sweep plan below are still the to-do list for tuning the shipped defaults on a
+> real release pool.
 
 ## Why change
 
@@ -350,7 +353,7 @@ Per-profile-name overrides may also set `size_aim` / weights; they inherit the s
    - `test_decision.py`: resolution-fallback behavior; the four worked examples from the user.
    - Doc-sync test: `matrix()` output matches the tables in this file (or generate the tables).
 7. **Validate the existing weights and limits** (see [Validation](#validation-of-current-weights-and-limits)).
-8. **Docs**: fold the final matrices into `optimizer-design.md`; update README's "How it works"
+8. **Docs**: keep the as-built matrices in `ALGORITHM.md`; update README's "How it works"
    step 3–4; keep this file as the rationale.
 9. **Lint/format**: `ruff check` + `ruff format` before done; write validation results to a
    timestamped `.md` in `reports/`.
