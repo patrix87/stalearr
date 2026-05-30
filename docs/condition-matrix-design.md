@@ -378,6 +378,12 @@ gap-cut), and writes a timestamped report to `reports/`. Extend it to:
   - **much-smaller, lower-score current file**: confirm *no* profile inflates size — a file
     already at/below its aim is `n_size = 1.0` and is never swapped for a bigger one; Remux just
     holds unless a higher-scoring release exists.
+  - **excellent release slightly above target must not be dropped for size**: a high-score
+    release just above the aim takes only a small, linear `n_size` penalty (not a cliff), so for
+    score-leaning profiles (Remux/Quality/Balanced) it still wins; for Efficient/Compact a
+    *marginal* score lead may lose to a smaller file (intended), but a clearly-better release
+    must win. Assert this; if a genuinely great release loses, the lever is `size_aim` above the
+    realistic target (plateau extends past it) or a smaller size weight — not a hard exclusion.
 - Assert the **no-oscillation property** on the real presets: for random A/B pairs there is no
   profile where both A→B and B→A are accepted (this also checks `score_much > score_slack`
   holds with the shipped numbers).
