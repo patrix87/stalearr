@@ -49,7 +49,10 @@ class TopsisConfig:
 class OptimizerAppConfig:
     enabled: bool = True
     min_age_days: int = 0
-    release_type: str = ""
+    # List of date fields the age gate checks. ALL listed dates must be at least
+    # min_age_days old. Two-gate default ([release, dateAdded]) avoids touching freshly
+    # released items (still being chased by Radarr/Sonarr) and freshly imported files.
+    release_type: list[str] = field(default_factory=list)
     # If False, releases bigger than the current file are filtered out before scoring —
     # blocks resolution upgrades too (1080p -> 2160p is always a size increase).
     allow_size_increase: bool = True
@@ -57,6 +60,14 @@ class OptimizerAppConfig:
     # scoring. NOTE: turning this off neutralizes size-leaning presets (Compact/Efficient),
     # which are designed to swap a slightly-lower-score release for a meaningfully smaller one.
     allow_quality_downgrade: bool = True
+    # If True, queue items waiting for manual import don't count toward queue_max — only
+    # actively downloading/queued items do. Keeps the optimizer flowing when downgrades or
+    # other rejected items pile up in the import-pending state.
+    ignore_completed_in_queue: bool = True
+    # If True, on each tick the worker scans the queue for completed items rejected solely
+    # for score regression ("Not an upgrade") and force-imports them through manualimport.
+    # Other rejection categories (executable/sample/mismatch) are left untouched.
+    auto_import_downgrades: bool = True
 
 
 @dataclass
@@ -154,18 +165,37 @@ def _parse_topsis(raw: dict) -> TopsisConfig:
     )
 
 
+def _parse_release_types(raw: object, allowed: set[str], where: str) -> list[str]:
+    if isinstance(raw, str):
+        raise ValueError(
+            f"{where}.release_type must be a list of strings, got string {raw!r}. "
+            f'Use release_type = ["{raw}"]'
+        )
+    if not isinstance(raw, list) or not raw:
+        raise ValueError(f"{where}.release_type must be a non-empty list, got {raw!r}")
+    out: list[str] = []
+    for entry in raw:
+        entry_s = str(entry).strip()
+        if entry_s not in allowed:
+            raise ValueError(f"{where}.release_type entry {entry_s!r} not in {sorted(allowed)}")
+        out.append(entry_s)
+    return out
+
+
 def _parse_optimizer_app(
-    raw: dict, default_release_type: str, allowed: set[str], where: str
+    raw: dict, default_release_type: list[str], allowed: set[str], where: str
 ) -> OptimizerAppConfig:
-    release_type = str(raw.get("release_type", default_release_type)).strip()
-    if release_type not in allowed:
-        raise ValueError(f"{where}.release_type={release_type!r} not in {sorted(allowed)}")
+    release_type = _parse_release_types(
+        raw.get("release_type", default_release_type), allowed, where
+    )
     return OptimizerAppConfig(
         enabled=bool(raw.get("enabled", True)),
         min_age_days=int(raw.get("min_age_days", 0)),
         release_type=release_type,
         allow_size_increase=bool(raw.get("allow_size_increase", True)),
         allow_quality_downgrade=bool(raw.get("allow_quality_downgrade", True)),
+        ignore_completed_in_queue=bool(raw.get("ignore_completed_in_queue", True)),
+        auto_import_downgrades=bool(raw.get("auto_import_downgrades", True)),
     )
 
 
@@ -188,10 +218,16 @@ def parse_optimizer(raw: dict) -> OptimizerConfig:
         list_refresh_minutes=int(raw.get("list_refresh_minutes", 15)),
         reevaluate_after_days=int(raw.get("reevaluate_after_days", 30)),
         radarr=_parse_optimizer_app(
-            raw.get("radarr", {}), "digitalRelease", RADARR_RELEASE_TYPES, "optimizer.radarr"
+            raw.get("radarr", {}),
+            ["digitalRelease", "dateAdded"],
+            RADARR_RELEASE_TYPES,
+            "optimizer.radarr",
         ),
         sonarr=_parse_optimizer_app(
-            raw.get("sonarr", {}), "airDateUtc", SONARR_RELEASE_TYPES, "optimizer.sonarr"
+            raw.get("sonarr", {}),
+            ["airDateUtc", "dateAdded"],
+            SONARR_RELEASE_TYPES,
+            "optimizer.sonarr",
         ),
         topsis=_parse_topsis(raw.get("topsis", {})),
     )

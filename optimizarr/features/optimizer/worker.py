@@ -31,14 +31,27 @@ from optimizarr.features.optimizer.topsis import Topsis
 
 logger = logging.getLogger("optimizarr")
 
+# Score-regression marker — case-insensitive substring covers both
+# "Not an upgrade for existing movie file(s)" and
+# "Not a Custom Format upgrade for existing movie file(s)" (and Sonarr's episode variants).
+# Anything OTHER than this in statusMessages (executable / archive file / sample / mediainfo
+# mismatch) is left untouched by auto-import — those categories will get a separate handler
+# once we've seen real-world examples.
+_SCORE_REGRESSION_MARKER = "not an upgrade"
+
 
 def age_ok(api: ArrApi, item: dict, app_cfg: OptimizerAppConfig, now: datetime) -> bool:
-    """True if the item is old enough to consider. With min_age_days <= 0 there is no gate.
-    When gating is on and the release date is unknown, the item is skipped."""
+    """True if the item passes ALL configured release-date gates. With min_age_days <= 0 the
+    gate is off. Each entry in release_type must be at least min_age_days old; a missing date
+    keeps the gate closed (better to wait than to touch something whose release we can't
+    verify — that's the whole point of the two-gate setup)."""
     if app_cfg.min_age_days <= 0:
         return True
-    age = age_days(api.reference_date(item, app_cfg.release_type), now)
-    return age is not None and age >= app_cfg.min_age_days
+    for rt in app_cfg.release_type:
+        age = age_days(api.reference_date(item, rt), now)
+        if age is None or age < app_cfg.min_age_days:
+            return False
+    return True
 
 
 class _AppContext:
@@ -157,6 +170,59 @@ class OptimizerWorker:
         if not self.dry_run:
             adapter.grab(decision.release or {})
 
+    def _handle_queue_imports(self, ctx: _AppContext) -> None:
+        """Scan the queue for completed items rejected solely on score regression and push
+        them through manualimport so they actually land. Strict scope — virus/sample/mismatch
+        and anything else with mixed rejections is left for a future, separate flow."""
+        if not ctx.app_cfg.auto_import_downgrades:
+            return
+        adapter = ctx.adapter
+        try:
+            records = adapter.queue_items()
+        except Exception:
+            logger.exception("[%s] queue fetch failed during auto-import scan", adapter.app)
+            return
+
+        for record in records:
+            if not _is_score_regression(record):
+                continue
+            download_id = record.get("downloadId")
+            if not download_id:
+                continue
+            title = record.get("title") or f"queue#{record.get('id')}"
+            if self.dry_run:
+                logger.info(
+                    "[%s] would manual-import (downgrade) %s (downloadId=%s)",
+                    adapter.app,
+                    title,
+                    download_id,
+                )
+                continue
+            try:
+                candidates = adapter.manual_import_candidates(download_id)
+            except Exception:
+                logger.exception("[%s] manualimport GET failed for %s", adapter.app, title)
+                continue
+            importable = [c for c in candidates if _is_importable_downgrade(c)]
+            if not importable:
+                logger.info(
+                    "[%s] no importable candidates for downgrade %s (downloadId=%s); leaving alone",
+                    adapter.app,
+                    title,
+                    download_id,
+                )
+                continue
+            try:
+                adapter.manual_import(importable, import_mode="auto")
+                logger.info(
+                    "[%s] auto-imported downgrade %s (%d file(s))",
+                    adapter.app,
+                    title,
+                    len(importable),
+                )
+            except Exception:
+                logger.exception("[%s] manualimport POST failed for %s", adapter.app, title)
+
     def _sleep(self, seconds: float) -> None:
         self._stop.wait(seconds)
 
@@ -190,9 +256,19 @@ class OptimizerWorker:
             self._refresh(ctx, now)
             ctx.pool = []  # force rebuild below
 
-        # One queue fetch serves both the global gate and the "is this item currently
-        # downloading?" skip below — no in-flight state needed.
-        queue_count, queue_ids = adapter.queue()
+        # Auto-import stuck downgrades first so they stop blocking the queue (and so the
+        # item-id skip set below doesn't keep them locked out forever).
+        self._handle_queue_imports(ctx)
+
+        # One queue fetch serves both the global gate and the per-item skip. The gate's count
+        # optionally filters out items already past download (waiting for or doing import) —
+        # those don't consume bandwidth and shouldn't block new picks.
+        records = adapter.queue_items()
+        queue_ids = {qid for r in records if (qid := adapter.queue_item_id(r)) is not None}
+        if ctx.app_cfg.ignore_completed_in_queue:
+            queue_count = sum(1 for r in records if adapter.is_queue_item_active(r))
+        else:
+            queue_count = len(records)
 
         if not ctx.pool:
             self._build_pool(ctx, now)
@@ -222,3 +298,32 @@ def run_optimizer(config: Config, state: StateManager) -> OptimizerWorker:
     worker = OptimizerWorker(config, state)
     worker.run()
     return worker
+
+
+# ----- queue classification helpers -----
+
+
+def _is_score_regression(record: dict) -> bool:
+    """True iff a queue record looks like a completed download stuck purely on
+    score-regression rejection. Conservative: requires (a) status=completed, (b) a state
+    that signals the importer has touched it (importPending or importBlocked), and (c) at
+    least one statusMessage containing the score-regression marker."""
+    if (record.get("status") or "").lower() != "completed":
+        return False
+    if record.get("trackedDownloadState") not in {"importPending", "importBlocked"}:
+        return False
+    for sm in record.get("statusMessages") or []:
+        for msg in sm.get("messages") or []:
+            if _SCORE_REGRESSION_MARKER in (msg or "").lower():
+                return True
+    return False
+
+
+def _is_importable_downgrade(candidate: dict) -> bool:
+    """True iff a manualimport candidate has no rejections, or only score-regression
+    rejections. Any other rejection reason (Sample, executable, mismatch, MediaInfo, etc.)
+    blocks the auto-import — those need a deliberate human decision."""
+    rejections = candidate.get("rejections") or []
+    if not rejections:
+        return True
+    return all(_SCORE_REGRESSION_MARKER in (rj.get("reason") or "").lower() for rj in rejections)

@@ -97,6 +97,7 @@ def test_missing_config_file_uses_defaults(monkeypatch):
 
 
 def test_rejects_invalid_radarr_release_type(monkeypatch, tmp_path):
+    # The unmonitor's release_type is still a single string — only the optimizer's takes a list.
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
     path = _write(tmp_path, '[unmonitor.radarr]\nrelease_type = "premiereDate"\n')
@@ -152,8 +153,14 @@ def test_optimizer_app_age_gate_defaults(monkeypatch, tmp_path):
     monkeypatch.setenv("RADARR_API_KEY", "k")
     config = load_config(_write(tmp_path, ""))
     assert config.optimizer.radarr.min_age_days == 0
-    assert config.optimizer.radarr.release_type == "digitalRelease"
-    assert config.optimizer.sonarr.release_type == "airDateUtc"
+    # Dual-gate by default: release date AND dateAdded both must pass.
+    assert config.optimizer.radarr.release_type == ["digitalRelease", "dateAdded"]
+    assert config.optimizer.sonarr.release_type == ["airDateUtc", "dateAdded"]
+    # New per-app flags default on.
+    assert config.optimizer.radarr.ignore_completed_in_queue is True
+    assert config.optimizer.radarr.auto_import_downgrades is True
+    assert config.optimizer.sonarr.ignore_completed_in_queue is True
+    assert config.optimizer.sonarr.auto_import_downgrades is True
 
 
 def test_optimizer_per_app_enabled_and_filter_flags(monkeypatch, tmp_path):
@@ -165,18 +172,24 @@ def test_optimizer_per_app_enabled_and_filter_flags(monkeypatch, tmp_path):
         [optimizer.sonarr]
         enabled = false
         allow_size_increase = false
+        ignore_completed_in_queue = false
 
         [optimizer.radarr]
         allow_quality_downgrade = false
+        auto_import_downgrades = false
         """,
     )
     config = load_config(path)
     assert config.optimizer.sonarr.enabled is False
     assert config.optimizer.sonarr.allow_size_increase is False
+    assert config.optimizer.sonarr.ignore_completed_in_queue is False
     assert config.optimizer.radarr.allow_quality_downgrade is False
+    assert config.optimizer.radarr.auto_import_downgrades is False
     # untouched flags keep their defaults
     assert config.optimizer.radarr.enabled is True
     assert config.optimizer.radarr.allow_size_increase is True
+    assert config.optimizer.radarr.ignore_completed_in_queue is True
+    assert config.optimizer.sonarr.auto_import_downgrades is True
 
 
 def test_optimizer_app_age_gate_overrides(monkeypatch, tmp_path):
@@ -187,18 +200,53 @@ def test_optimizer_app_age_gate_overrides(monkeypatch, tmp_path):
         """
         [optimizer.radarr]
         min_age_days = 14
-        release_type = "inCinemas"
+        release_type = ["inCinemas"]
         """,
     )
     config = load_config(path)
     assert config.optimizer.radarr.min_age_days == 14
-    assert config.optimizer.radarr.release_type == "inCinemas"
+    assert config.optimizer.radarr.release_type == ["inCinemas"]
+
+
+def test_optimizer_release_type_accepts_multi_date_list(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(
+        tmp_path,
+        """
+        [optimizer.radarr]
+        release_type = ["digitalRelease", "physicalRelease", "dateAdded"]
+        """,
+    )
+    config = load_config(path)
+    assert config.optimizer.radarr.release_type == [
+        "digitalRelease",
+        "physicalRelease",
+        "dateAdded",
+    ]
+
+
+def test_rejects_release_type_as_string(monkeypatch, tmp_path):
+    # Strict: a bare string is no longer accepted — must be a list.
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, '[optimizer.radarr]\nrelease_type = "digitalRelease"\n')
+    with pytest.raises(ValueError, match="must be a list of strings"):
+        load_config(path)
+
+
+def test_rejects_empty_release_type_list(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(tmp_path, "[optimizer.radarr]\nrelease_type = []\n")
+    with pytest.raises(ValueError, match="non-empty list"):
+        load_config(path)
 
 
 def test_rejects_invalid_optimizer_release_type(monkeypatch, tmp_path):
     monkeypatch.setenv("SONARR_URL", "http://x")
     monkeypatch.setenv("SONARR_API_KEY", "k")
-    path = _write(tmp_path, '[optimizer.sonarr]\nrelease_type = "digitalRelease"\n')
+    path = _write(tmp_path, '[optimizer.sonarr]\nrelease_type = ["digitalRelease"]\n')
     with pytest.raises(ValueError, match="optimizer.sonarr.release_type"):
         load_config(path)
 

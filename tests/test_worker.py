@@ -5,7 +5,13 @@ from optimizarr.config import Connection
 from optimizarr.features.optimizer.config import OptimizerAppConfig, OptimizerConfig, default_topsis
 from optimizarr.features.optimizer.state import SATISFIED, StateManager
 from optimizarr.features.optimizer.topsis import GB, Topsis
-from optimizarr.features.optimizer.worker import OptimizerWorker, _AppContext, age_ok
+from optimizarr.features.optimizer.worker import (
+    OptimizerWorker,
+    _AppContext,
+    _is_importable_downgrade,
+    _is_score_regression,
+    age_ok,
+)
 
 NOW = datetime(2026, 5, 28, tzinfo=UTC)
 
@@ -38,8 +44,8 @@ def _radarr_api():
     return RadarrApi(Connection(name="radarr", url="http://x", api_key="k"))
 
 
-def _opt_cfg(min_age_days, release_type="digitalRelease"):
-    return OptimizerAppConfig(min_age_days=min_age_days, release_type=release_type)
+def _opt_cfg(min_age_days, release_type=("digitalRelease",)):
+    return OptimizerAppConfig(min_age_days=min_age_days, release_type=list(release_type))
 
 
 def test_age_gate_disabled_passes_everything():
@@ -59,12 +65,94 @@ def test_age_gate_blocks_recent_and_allows_old():
 
 def test_age_gate_date_added_reads_movie_file():
     api = _radarr_api()
-    cfg = _opt_cfg(14, release_type="dateAdded")
+    cfg = _opt_cfg(14, release_type=("dateAdded",))
     item = {
         "digitalRelease": "2026-05-27T00:00:00Z",
         "movieFile": {"dateAdded": "2026-01-01T00:00:00Z"},
     }
     assert age_ok(api, item, cfg, NOW)  # uses movieFile.dateAdded, which is old
+
+
+def test_age_gate_dual_requires_all_dates_old():
+    # The dual gate is the heart of the change: an item must clear BOTH dates to be
+    # picked. Just-released movies (recent digitalRelease) and just-imported files
+    # (recent dateAdded) are kept off-limits even when the other date is old.
+    api = _radarr_api()
+    cfg = _opt_cfg(14, release_type=("digitalRelease", "dateAdded"))
+
+    # Both old -> pass.
+    both_old = {
+        "digitalRelease": "2026-01-01T00:00:00Z",
+        "movieFile": {"dateAdded": "2026-02-01T00:00:00Z"},
+    }
+    assert age_ok(api, both_old, cfg, NOW)
+
+    # Fresh release, file long on disk -> still blocked by the release-age gate.
+    fresh_release = {
+        "digitalRelease": "2026-05-27T00:00:00Z",
+        "movieFile": {"dateAdded": "2026-01-01T00:00:00Z"},
+    }
+    assert not age_ok(api, fresh_release, cfg, NOW)
+
+    # Old release, just-added file -> blocked by the file-age gate.
+    fresh_file = {
+        "digitalRelease": "2026-01-01T00:00:00Z",
+        "movieFile": {"dateAdded": "2026-05-27T00:00:00Z"},
+    }
+    assert not age_ok(api, fresh_file, cfg, NOW)
+
+    # Missing date -> the gate stays closed (conservative).
+    missing_release = {"movieFile": {"dateAdded": "2026-01-01T00:00:00Z"}}
+    assert not age_ok(api, missing_release, cfg, NOW)
+
+
+# ----- queue classification -----
+
+
+def test_is_score_regression_matches_completed_with_marker():
+    record = {
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "statusMessages": [
+            {"title": "x", "messages": ["Not an upgrade for existing movie file(s)"]}
+        ],
+    }
+    assert _is_score_regression(record)
+
+
+def test_is_score_regression_ignores_still_downloading():
+    record = {
+        "status": "downloading",
+        "trackedDownloadState": "downloading",
+        "statusMessages": [{"title": "x", "messages": ["Not an upgrade"]}],
+    }
+    assert not _is_score_regression(record)
+
+
+def test_is_score_regression_ignores_other_categories():
+    # Virus/executable: NOT a downgrade — leave alone.
+    record = {
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "statusMessages": [{"title": "x", "messages": ["Found executable in download: foo.exe"]}],
+    }
+    assert not _is_score_regression(record)
+
+
+def test_is_importable_downgrade_accepts_no_or_score_only_rejections():
+    assert _is_importable_downgrade({"rejections": []})
+    assert _is_importable_downgrade(
+        {"rejections": [{"reason": "Not an upgrade for existing movie file(s)"}]}
+    )
+    # Mixed rejections (e.g. sample) -> not importable; needs human review.
+    assert not _is_importable_downgrade(
+        {
+            "rejections": [
+                {"reason": "Not an upgrade"},
+                {"reason": "Sample"},
+            ]
+        }
+    )
 
 
 # ----- _process_one: grab vs HOLD, and what gets persisted -----
@@ -176,6 +264,109 @@ def test_build_pool_holds_progress_across_refresh_then_resets(tmp_path):
     w._build_pool(ctx, now)
     assert set(ctx.pool) == {1, 2, 3}
     assert ctx.evaluated == set()
+
+
+class _QueueAdapter(ArrApi):
+    """Adapter double for queue/manualimport tests — records POSTed imports."""
+
+    app = "radarr"
+    _queue_id_field = "movieId"
+
+    def __init__(self, records, candidates=None):
+        self._records = records
+        self._candidates = candidates or {}
+        self.imports: list[tuple[list[dict], str]] = []
+
+    def queue_items(self):
+        return self._records
+
+    def manual_import_candidates(self, download_id):
+        return self._candidates.get(download_id, [])
+
+    def manual_import(self, items, import_mode="auto"):
+        # Record items + mode separately so the test can assert both without coupling to the
+        # real method's body-wrapping behavior.
+        self.imports.append((list(items), import_mode))
+
+
+def _downgrade_record(download_id="dl1", movie_id=42):
+    return {
+        "id": 1,
+        "movieId": movie_id,
+        "downloadId": download_id,
+        "title": "Movie.2024.2160p.WEB.x265",
+        "status": "completed",
+        "trackedDownloadState": "importPending",
+        "statusMessages": [
+            {"title": "x", "messages": ["Not an upgrade for existing movie file(s)"]}
+        ],
+    }
+
+
+def test_handle_queue_imports_force_imports_downgrades(tmp_path):
+    state = StateManager(str(tmp_path / "s.json"))
+    record = _downgrade_record()
+    candidate = {
+        "path": "/downloads/Movie.2024.mkv",
+        "movie": {"id": 42},
+        "quality": {"quality": {"name": "WEBDL-2160p"}},
+        "rejections": [{"reason": "Not an upgrade for existing movie file(s)"}],
+    }
+    adapter = _QueueAdapter([record], candidates={"dl1": [candidate]})
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
+    w = _worker(state)
+    w._handle_queue_imports(ctx)
+    assert adapter.imports == [([candidate], "auto")]
+
+
+def test_handle_queue_imports_dry_run_does_not_post(tmp_path):
+    state = StateManager(str(tmp_path / "s.json"))
+    adapter = _QueueAdapter(
+        [_downgrade_record()],
+        candidates={"dl1": [{"path": "/x.mkv", "rejections": []}]},
+    )
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
+    w = _worker(state, dry_run=True)
+    w._handle_queue_imports(ctx)
+    assert adapter.imports == []
+
+
+def test_handle_queue_imports_skips_when_candidates_have_other_rejections(tmp_path):
+    # Sample rejection alongside the downgrade -> leave alone for human review.
+    state = StateManager(str(tmp_path / "s.json"))
+    candidate = {
+        "path": "/downloads/x.mkv",
+        "rejections": [
+            {"reason": "Not an upgrade"},
+            {"reason": "Sample"},
+        ],
+    }
+    adapter = _QueueAdapter([_downgrade_record()], candidates={"dl1": [candidate]})
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=True))
+    _worker(state)._handle_queue_imports(ctx)
+    assert adapter.imports == []
+
+
+def test_handle_queue_imports_disabled_is_noop(tmp_path):
+    state = StateManager(str(tmp_path / "s.json"))
+    adapter = _QueueAdapter(
+        [_downgrade_record()],
+        candidates={"dl1": [{"path": "/x.mkv", "rejections": []}]},
+    )
+    ctx = _AppContext(adapter, OptimizerAppConfig(auto_import_downgrades=False))
+    _worker(state)._handle_queue_imports(ctx)
+    assert adapter.imports == []
+
+
+def test_queue_active_filter_excludes_completed_when_flag_on():
+    # ignore_completed_in_queue mirrors how _process_app_once computes queue_count.
+    active = {"status": "downloading", "trackedDownloadState": "downloading"}
+    pending = {"status": "completed", "trackedDownloadState": "importPending"}
+    importing = {"status": "completed", "trackedDownloadState": "importing"}
+    records = [active, pending, importing]
+    assert sum(1 for r in records if ArrApi.is_queue_item_active(r)) == 1
+    # When the flag is off, the worker would use len(records) instead -> all 3 count.
+    assert len(records) == 3
 
 
 def test_build_pool_excludes_satisfied(tmp_path):

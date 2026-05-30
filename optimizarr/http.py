@@ -32,7 +32,7 @@ class ArrClient:
         self.base_url = base_url
         self.api_key = api_key
 
-    def _request(self, method: str, path: str, body: dict | None = None) -> Any:
+    def _request(self, method: str, path: str, body: dict | list | None = None) -> Any:
         url = f"{self.base_url}{path}"
         headers = {
             "X-Api-Key": self.api_key,
@@ -74,8 +74,8 @@ class ArrClient:
     def get(self, path: str) -> Any:
         return self._request("GET", path)
 
-    def put(self, path: str, body: dict) -> Any:
+    def put(self, path: str, body: dict | list) -> Any:
         return self._request("PUT", path, body)
 
-    def post(self, path: str, body: dict) -> Any:
+    def post(self, path: str, body: dict | list) -> Any:
         return self._request("POST", path, body)

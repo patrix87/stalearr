@@ -29,26 +29,43 @@ process_interval_seconds = 15
 list_refresh_minutes = 15
 reevaluate_after_days = 30
 
-# Per-app: `enabled` toggles the app from the optimizer.
-# `allow_size_increase = false` drops candidates bigger than the current file (blocks
-#   resolution upgrades too, since 1080p -> 2160p is always bigger).
-# `allow_quality_downgrade = false` drops candidates with a lower customFormatScore than
-#   the current file. WARNING: turning this off neutralizes size-leaning presets
-#   (Compact/Efficient), which deliberately swap a slightly-lower-score release for a
-#   meaningfully smaller one.
+# Per-app:
+#   enabled                    toggle this app from the optimizer.
+#   min_age_days               age threshold applied to every date in release_type.
+#   release_type               LIST of date fields the age gate checks; ALL must be at least
+#                              min_age_days old (so an item is only picked once it has been
+#                              both released long enough AND on disk long enough). A missing
+#                              date keeps the gate closed.
+#   allow_size_increase        false -> drop candidates bigger than the current file (blocks
+#                              resolution upgrades, since 1080p -> 2160p is always bigger).
+#   allow_quality_downgrade    false -> drop candidates with a lower customFormatScore than
+#                              the current file. WARNING: turning this off neutralizes
+#                              size-leaning presets (Compact/Efficient), which deliberately
+#                              swap a slightly-lower-score release for a much smaller one.
+#   ignore_completed_in_queue  true -> items waiting for manual import don't count toward
+#                              queue_max; only actively downloading/queued items do. Keeps
+#                              the optimizer flowing when downgrades pile up unimported.
+#   auto_import_downgrades     true -> the worker scans the queue each tick and force-imports
+#                              completed items rejected solely for score regression
+#                              ("Not an upgrade"). Other rejection categories (executable,
+#                              sample, mismatch) are left untouched.
 [optimizer.radarr]
 enabled = true
 min_age_days = 0
-release_type = "digitalRelease"
+release_type = ["digitalRelease", "dateAdded"]
 allow_size_increase = true
 allow_quality_downgrade = true
+ignore_completed_in_queue = true
+auto_import_downgrades = true
 
 [optimizer.sonarr]
 enabled = true
 min_age_days = 0
-release_type = "airDateUtc"
+release_type = ["airDateUtc", "dateAdded"]
 allow_size_increase = true
 allow_quality_downgrade = true
+ignore_completed_in_queue = true
+auto_import_downgrades = true
 
 # ===== TOPSIS =====
 [optimizer.topsis]

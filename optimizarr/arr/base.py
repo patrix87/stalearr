@@ -10,8 +10,14 @@ Item *selection* (age gate, monitored, cutoff) lives in the features, not here: 
 lists raw items and exposes accessors; each feature applies its own predicate.
 """
 
+from urllib.parse import quote
+
 from optimizarr.config import Connection
 from optimizarr.http import ArrClient
+
+# trackedDownloadState values that mean the download finished and is no longer consuming
+# bandwidth — used to filter "active" queue items vs. ones stuck waiting for/in import.
+QUEUE_INACTIVE_STATES = {"importPending", "importing", "imported", "importBlocked"}
 
 
 def max_allowed_resolution(profile_items: list[dict]) -> int:
@@ -82,12 +88,33 @@ class ArrApi:
             {"guid": release["guid"], "indexerId": release.get("indexerId")},
         )
 
-    def queue(self) -> tuple[int, set[int]]:
+    def queue_items(self) -> list[dict]:
+        """Full queue records (status, trackedDownloadState, statusMessages, etc.) — the
+        worker computes both the queue_max count and the in-progress item-id set from this."""
         resp = self.client.get("/api/v3/queue?page=1&pageSize=1000") or {}
-        records = resp.get("records", [])
-        count = resp.get("totalRecords", len(records))
-        ids = {r[self._queue_id_field] for r in records if r.get(self._queue_id_field)}
-        return count, ids
+        return resp.get("records", []) or []
+
+    def queue_item_id(self, record: dict) -> int | None:
+        """movieId / episodeId for a queue record (None if missing)."""
+        return record.get(self._queue_id_field)
+
+    @staticmethod
+    def is_queue_item_active(record: dict) -> bool:
+        """True when the record represents an item still downloading or queued — i.e. NOT
+        completed and waiting for / already past import. Used by `ignore_completed_in_queue`."""
+        if (record.get("status") or "").lower() == "completed":
+            return False
+        return record.get("trackedDownloadState") not in QUEUE_INACTIVE_STATES
+
+    def manual_import_candidates(self, download_id: str) -> list[dict]:
+        """List importable files for a downloadId (GET /api/v3/manualimport?downloadId=).
+        Each candidate carries proposed movie/episode, quality, customFormats, rejections."""
+        return self.client.get(f"/api/v3/manualimport?downloadId={quote(download_id)}") or []
+
+    def manual_import(self, items: list[dict], import_mode: str = "auto") -> None:
+        """POST /api/v3/manualimport with the given candidate items. Same path on both apps."""
+        body = [{**it, "importMode": import_mode} for it in items]
+        self.client.post("/api/v3/manualimport", body)
 
     # ----- app-specific (subclasses implement) -----
 

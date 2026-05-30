@@ -44,28 +44,44 @@ list_refresh_minutes = 15
 reevaluate_after_days = 30
 
 # Per-app options:
-#   enabled                  toggle this app from the optimizer (default true).
-#   min_age_days             only consider items this many days past their release date.
-#   release_type             which date field to measure age from.
-#   allow_size_increase      if false, drop candidates bigger than the current file
-#                            (blocks 1080p -> 2160p upgrades since those are always bigger).
-#   allow_quality_downgrade  if false, drop candidates with a lower customFormatScore than
-#                            the current file. WARNING: turning this off neutralizes
-#                            size-leaning presets (Compact/Efficient), whose whole point is
-#                            picking a slightly-lower-score release for a much smaller size.
+#   enabled                    toggle this app from the optimizer (default true).
+#   min_age_days               age threshold applied to every date in release_type.
+#   release_type               LIST of date fields the age gate checks; ALL must be at least
+#                              min_age_days old. The shipped two-gate default avoids touching
+#                              freshly-released items (still being chased by Radarr/Sonarr)
+#                              AND freshly-imported files. Missing date -> gate stays closed.
+#                              Radarr values: digitalRelease, physicalRelease, inCinemas,
+#                              releaseDate, dateAdded. Sonarr values: airDateUtc, dateAdded.
+#   allow_size_increase        if false, drop candidates bigger than the current file
+#                              (blocks 1080p -> 2160p upgrades, those are always bigger).
+#   allow_quality_downgrade    if false, drop candidates with a lower customFormatScore than
+#                              the current file. WARNING: turning this off neutralizes
+#                              size-leaning presets (Compact/Efficient), whose whole point is
+#                              picking a slightly-lower-score release for a much smaller size.
+#   ignore_completed_in_queue  if true, queue items waiting for manual import don't count
+#                              toward queue_max — only actively downloading/queued items do.
+#                              Prevents stuck imports from blocking the optimizer.
+#   auto_import_downgrades     if true, on each tick the worker scans the queue and force-
+#                              imports completed items rejected solely for score regression
+#                              ("Not an upgrade"). Other rejection categories (executable,
+#                              sample, mismatch) are left untouched. Defaults: true on both.
 [optimizer.radarr]
 enabled = true
 min_age_days = 30
-release_type = "digitalRelease"
+release_type = ["digitalRelease", "dateAdded"]
 allow_size_increase = true
 allow_quality_downgrade = true
+ignore_completed_in_queue = true
+auto_import_downgrades = true
 
 [optimizer.sonarr]
 enabled = true
 min_age_days = 30
-release_type = "airDateUtc"
+release_type = ["airDateUtc", "dateAdded"]
 allow_size_increase = true
 allow_quality_downgrade = true
+ignore_completed_in_queue = true
+auto_import_downgrades = true
 
 # ===== TOPSIS =====
 # You usually don't need this section at all — the shipped presets are sensible. Set values

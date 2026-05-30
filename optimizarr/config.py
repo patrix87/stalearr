@@ -158,11 +158,15 @@ def log_summary(config: Config) -> None:
         )
         for name, app in (("radarr", opt.radarr), ("sonarr", opt.sonarr)):
             logger.info(
-                "  optimizer.%s: enabled=%s min_age_days=%d allow_size_increase=%s "
-                "allow_quality_downgrade=%s",
+                "  optimizer.%s: enabled=%s min_age_days=%d release_type=%s "
+                "allow_size_increase=%s allow_quality_downgrade=%s "
+                "ignore_completed_in_queue=%s auto_import_downgrades=%s",
                 name,
                 app.enabled,
                 app.min_age_days,
+                app.release_type,
                 app.allow_size_increase,
                 app.allow_quality_downgrade,
+                app.ignore_completed_in_queue,
+                app.auto_import_downgrades,
             )
