@@ -33,7 +33,7 @@ LABEL org.opencontainers.image.title="optimizarr"
 LABEL org.opencontainers.image.description="TOPSIS-based release optimizer for Radarr/Sonarr, plus a configurable unmonitor job."
 LABEL org.opencontainers.image.source="https://github.com/patrix87/optimizarr"
 LABEL org.opencontainers.image.url="https://github.com/patrix87/optimizarr"
-LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.licenses="PolyForm-Noncommercial-1.0.0"
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PATH="/app/.venv/bin:$PATH"

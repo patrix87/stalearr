@@ -153,12 +153,13 @@ Two workflows live in `.github/workflows/`:
 - **ci.yml** runs `ruff check`, `ruff format --check`, and `pytest` on every push to `main` and
   every pull request.
 - **release.yml** builds a `linux/amd64` image and pushes it to `ghcr.io/patrix87/optimizarr`
-  (the image name follows the repo via `${{ github.repository }}`).
+  (the image name follows the repo via `${{ github.repository }}`), then publishes a **GitHub
+  Release** with auto-generated notes for the tag.
 
-| Trigger | Tags pushed |
-| --- | --- |
-| Push tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest` |
-| Manual `workflow_dispatch` | (none, image built but no semver tag applies) |
+| Trigger | Image tags pushed | GitHub Release |
+| --- | --- | --- |
+| Push tag `v1.2.3` | `1.2.3`, `1.2`, `1`, `latest` | created (auto notes) |
+| Manual `workflow_dispatch` | (none, no semver tag applies) | not created |
 
 ```sh
 git tag v0.2.0
