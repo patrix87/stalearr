@@ -34,7 +34,7 @@ def main() -> int:
         logger.error("unmonitor.cron_schedule %r is not a valid cron expression", um.cron_schedule)
         return 1
 
-    optimizer_enabled = opt.enabled and bool(opt.apps)
+    optimizer_enabled = opt.enabled and (opt.radarr.enabled or opt.sonarr.enabled)
     if not um.enabled and not optimizer_enabled:
         logger.info("Both unmonitor and optimizer are disabled; nothing to do")
         return 0

@@ -104,8 +104,6 @@ def load_config(config_path: str | None = None) -> Config:
         raise ValueError(f"Config file {path!r} is not valid TOML: {e}") from e
 
     optimizer = parse_optimizer(raw.get("optimizer", {}))
-    configured = {name for name, c in (("radarr", radarr), ("sonarr", sonarr)) if c is not None}
-    optimizer.apps = [a for a in optimizer.apps if a in configured]
 
     return Config(
         dry_run=bool(raw.get("dry_run", False)),
@@ -143,10 +141,11 @@ def log_summary(config: Config) -> None:
             )
 
     opt = config.optimizer
+    active = [n for n, a in (("radarr", opt.radarr), ("sonarr", opt.sonarr)) if a.enabled]
     logger.info(
-        "Optimizer: enabled=%s apps=%s queue_max=%d pick_order=%s",
+        "Optimizer: enabled=%s active_apps=%s queue_max=%d pick_order=%s",
         opt.enabled,
-        opt.apps,
+        active,
         opt.queue_max,
         opt.pick_order,
     )
@@ -157,3 +156,13 @@ def log_summary(config: Config) -> None:
             opt.list_refresh_minutes,
             opt.reevaluate_after_days,
         )
+        for name, app in (("radarr", opt.radarr), ("sonarr", opt.sonarr)):
+            logger.info(
+                "  optimizer.%s: enabled=%s min_age_days=%d allow_size_increase=%s "
+                "allow_quality_downgrade=%s",
+                name,
+                app.enabled,
+                app.min_age_days,
+                app.allow_size_increase,
+                app.allow_quality_downgrade,
+            )

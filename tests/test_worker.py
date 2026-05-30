@@ -104,7 +104,7 @@ class _ProcessAdapter(ArrApi):
 
 def _worker(state, dry_run=False):
     w = OptimizerWorker.__new__(OptimizerWorker)
-    w.opt = OptimizerConfig(enabled=True, apps=[])
+    w.opt = OptimizerConfig(enabled=True)
     w.state = state
     w.topsis = Topsis(default_topsis())
     w.dry_run = dry_run

@@ -30,11 +30,24 @@ def decide(
     profile_name: str | None,
     target_resolution: int | None,
     current_file: dict | None,
+    allow_size_increase: bool = True,
+    allow_quality_downgrade: bool = True,
 ) -> Decision:
     """Pure decision: given fetched data, return ACT (with the release) or HOLD.
 
     Swap iff the pick's overall closeness beats the current file's by at least
-    min_closeness_gain — closeness already weighs score, resolution, and size."""
+    min_closeness_gain — closeness already weighs score, resolution, and size.
+
+    Two optional pre-filters apply before scoring (per-app policy):
+      - allow_size_increase=False drops releases bigger than the current file;
+      - allow_quality_downgrade=False drops releases with a lower customFormatScore."""
+    cur = current_file or {}
+    cur_size = cur.get("size")
+    if not allow_size_increase and isinstance(cur_size, int) and cur_size > 0:
+        releases = [r for r in releases if r.get("size", 0) <= cur_size]
+    cur_score = cur.get("customFormatScore")
+    if not allow_quality_downgrade and cur_score is not None:
+        releases = [r for r in releases if (r.get("customFormatScore") or 0) >= cur_score]
     pick, diag = topsis.pick(releases, runtime_h, profile_name, target_resolution)
     current_closeness, cur_raw = topsis.closeness_for_current_file(
         current_file or {}, runtime_h, profile_name, target_resolution

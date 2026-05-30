@@ -47,14 +47,21 @@ class TopsisConfig:
 
 @dataclass
 class OptimizerAppConfig:
+    enabled: bool = True
     min_age_days: int = 0
     release_type: str = ""
+    # If False, releases bigger than the current file are filtered out before scoring —
+    # blocks resolution upgrades too (1080p -> 2160p is always a size increase).
+    allow_size_increase: bool = True
+    # If False, releases with a lower score than the current file are filtered out before
+    # scoring. NOTE: turning this off neutralizes size-leaning presets (Compact/Efficient),
+    # which are designed to swap a slightly-lower-score release for a meaningfully smaller one.
+    allow_quality_downgrade: bool = True
 
 
 @dataclass
 class OptimizerConfig:
     enabled: bool = False
-    apps: list[str] = field(default_factory=lambda: ["radarr", "sonarr"])
     queue_max: int = 5
     pick_order: str = "random"
     process_interval_seconds: int = 15
@@ -154,16 +161,15 @@ def _parse_optimizer_app(
     if release_type not in allowed:
         raise ValueError(f"{where}.release_type={release_type!r} not in {sorted(allowed)}")
     return OptimizerAppConfig(
+        enabled=bool(raw.get("enabled", True)),
         min_age_days=int(raw.get("min_age_days", 0)),
         release_type=release_type,
+        allow_size_increase=bool(raw.get("allow_size_increase", True)),
+        allow_quality_downgrade=bool(raw.get("allow_quality_downgrade", True)),
     )
 
 
 def parse_optimizer(raw: dict) -> OptimizerConfig:
-    apps = raw.get("apps", ["radarr", "sonarr"])
-    if not isinstance(apps, list) or any(a not in ("radarr", "sonarr") for a in apps):
-        raise ValueError(f"optimizer.apps must be a list from ['radarr','sonarr'], got {apps!r}")
-
     pick_order = str(raw.get("pick_order", "random")).strip()
     if pick_order not in PICK_ORDERS:
         raise ValueError(f"optimizer.pick_order={pick_order!r} not in {sorted(PICK_ORDERS)}")
@@ -176,7 +182,6 @@ def parse_optimizer(raw: dict) -> OptimizerConfig:
 
     return OptimizerConfig(
         enabled=bool(raw.get("enabled", False)),
-        apps=apps,
         queue_max=int(raw.get("queue_max", 5)),
         pick_order=pick_order,
         process_interval_seconds=process_interval_seconds,

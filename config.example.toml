@@ -31,7 +31,6 @@ require_cutoff_met = true
 # ===== Optimizer: interval-driven worker that re-picks better releases =====
 [optimizer]
 enabled = true
-apps = ["radarr", "sonarr"]
 # Only process when the download queue has <= queue_max items (0 = empty only).
 queue_max = 5
 # "random" or "ordered"
@@ -44,15 +43,29 @@ list_refresh_minutes = 15
 # A satisfied item (HOLD: nothing better found) is reconsidered this many days later.
 reevaluate_after_days = 30
 
-# Per-app age gate: only consider items at least min_age_days past their release date.
-# min_age_days = 0 disables the gate. release_type selects the date field used to measure age.
+# Per-app options:
+#   enabled                  toggle this app from the optimizer (default true).
+#   min_age_days             only consider items this many days past their release date.
+#   release_type             which date field to measure age from.
+#   allow_size_increase      if false, drop candidates bigger than the current file
+#                            (blocks 1080p -> 2160p upgrades since those are always bigger).
+#   allow_quality_downgrade  if false, drop candidates with a lower customFormatScore than
+#                            the current file. WARNING: turning this off neutralizes
+#                            size-leaning presets (Compact/Efficient), whose whole point is
+#                            picking a slightly-lower-score release for a much smaller size.
 [optimizer.radarr]
+enabled = true
 min_age_days = 30
 release_type = "digitalRelease"
+allow_size_increase = true
+allow_quality_downgrade = true
 
 [optimizer.sonarr]
+enabled = true
 min_age_days = 30
 release_type = "airDateUtc"
+allow_size_increase = true
+allow_quality_downgrade = true
 
 # ===== TOPSIS =====
 # You usually don't need this section at all — the shipped presets are sensible. Set values

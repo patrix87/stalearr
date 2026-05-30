@@ -22,21 +22,33 @@ require_cutoff_met = true
 
 # ===== Optimizer =====
 [optimizer]
-enabled = false
-apps = ["radarr", "sonarr"]
+enabled = true
 queue_max = 5
 pick_order = "random"
 process_interval_seconds = 15
 list_refresh_minutes = 15
 reevaluate_after_days = 30
 
+# Per-app: `enabled` toggles the app from the optimizer.
+# `allow_size_increase = false` drops candidates bigger than the current file (blocks
+#   resolution upgrades too, since 1080p -> 2160p is always bigger).
+# `allow_quality_downgrade = false` drops candidates with a lower customFormatScore than
+#   the current file. WARNING: turning this off neutralizes size-leaning presets
+#   (Compact/Efficient), which deliberately swap a slightly-lower-score release for a
+#   meaningfully smaller one.
 [optimizer.radarr]
+enabled = true
 min_age_days = 0
 release_type = "digitalRelease"
+allow_size_increase = true
+allow_quality_downgrade = true
 
 [optimizer.sonarr]
+enabled = true
 min_age_days = 0
 release_type = "airDateUtc"
+allow_size_increase = true
+allow_quality_downgrade = true
 
 # ===== TOPSIS =====
 [optimizer.topsis]

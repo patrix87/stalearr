@@ -91,6 +91,44 @@ def test_decide_act_on_clear_upgrade():
     assert d.release["guid"] == "g1"
 
 
+def test_decide_drops_bigger_releases_when_size_increase_disallowed():
+    # 30 GB release is bigger than the 20 GB current; with the flag off it's filtered out
+    # before TOPSIS even sees it, so the only survivor (a 14 GB release) wins.
+    current = _file(score=400_000, resolution="3840x2160", size_gb=20.0)
+    bigger = _release(guid="big", score=1_000_000, resolution=2160, size_gb=30.0)
+    smaller = _release(guid="small", score=900_000, resolution=2160, size_gb=14.0)
+    d = decide(
+        _topsis(),
+        [bigger, smaller],
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=current,
+        allow_size_increase=False,
+    )
+    assert d.action == "ACT"
+    assert d.release is not None and d.release["guid"] == "small"
+
+
+def test_decide_drops_lower_score_releases_when_downgrade_disallowed():
+    # The high-score remux beats current; the lower-score lean encode is filtered out
+    # before scoring (would otherwise win under size-leaning weights).
+    current = _file(score=800_000, resolution="3840x2160", size_gb=28.0)
+    higher = _release(guid="hi", score=1_000_000, resolution=2160, size_gb=32.0)
+    lower = _release(guid="lo", score=700_000, resolution=2160, size_gb=10.0)
+    d = decide(
+        _topsis(),
+        [higher, lower],
+        runtime_h=2.0,
+        profile_name="2160p Quality",
+        target_resolution=2160,
+        current_file=current,
+        allow_quality_downgrade=False,
+    )
+    assert d.action == "ACT"
+    assert d.release is not None and d.release["guid"] == "hi"
+
+
 def test_decide_hold_when_current_already_good():
     # Current file is already excellent and small; nothing better.
     releases = [_release(score=1_000_000, resolution=2160, size_gb=14.0)]

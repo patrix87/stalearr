@@ -71,9 +71,8 @@ class OptimizerWorker:
         conns = {"radarr": config.radarr, "sonarr": config.sonarr}
         app_cfgs = {"radarr": self.opt.radarr, "sonarr": self.opt.sonarr}
         self.contexts: dict[str, _AppContext] = {}
-        for app in self.opt.apps:
-            conn = conns[app]
-            if conn is None:
+        for app, conn in conns.items():
+            if conn is None or not app_cfgs[app].enabled:
                 continue
             self.contexts[app] = _AppContext(build_client(app, conn), app_cfgs[app])
 
@@ -132,7 +131,16 @@ class OptimizerWorker:
         current_file = adapter.current_file(item)
         releases = adapter.releases(item)
 
-        decision = decide(self.topsis, releases, runtime_h, profile_name, target_res, current_file)
+        decision = decide(
+            self.topsis,
+            releases,
+            runtime_h,
+            profile_name,
+            target_res,
+            current_file,
+            allow_size_increase=ctx.app_cfg.allow_size_increase,
+            allow_quality_downgrade=ctx.app_cfg.allow_quality_downgrade,
+        )
         label = adapter.label(item)
         logger.info("%s", format_decision(adapter.app, label, decision, self.dry_run))
 

@@ -44,8 +44,9 @@ def test_radarr_only_with_defaults(monkeypatch, tmp_path):
     assert um.radarr.release_type == "digitalRelease"
     assert um.radarr.require_cutoff_met is True
 
-    # apps list narrows to configured connections
-    assert config.optimizer.apps == ["radarr"]
+    # per-app enabled is on by default; sonarr's app config is still parsed even with no conn
+    assert config.optimizer.radarr.enabled is True
+    assert config.optimizer.sonarr.enabled is True
     assert config.optimizer.enabled is False
 
 
@@ -78,7 +79,7 @@ def test_overrides_from_toml(monkeypatch, tmp_path):
     assert config.unmonitor.sonarr.days == 60
     assert config.unmonitor.sonarr.release_type == "dateAdded"
     assert config.unmonitor.sonarr.require_cutoff_met is False
-    assert config.optimizer.apps == ["sonarr"]
+    assert config.optimizer.radarr.enabled is True  # per-app flag (worker still skips no-conn)
 
 
 def test_rejects_when_neither_configured(tmp_path):
@@ -153,6 +154,29 @@ def test_optimizer_app_age_gate_defaults(monkeypatch, tmp_path):
     assert config.optimizer.radarr.min_age_days == 0
     assert config.optimizer.radarr.release_type == "digitalRelease"
     assert config.optimizer.sonarr.release_type == "airDateUtc"
+
+
+def test_optimizer_per_app_enabled_and_filter_flags(monkeypatch, tmp_path):
+    monkeypatch.setenv("RADARR_URL", "http://x")
+    monkeypatch.setenv("RADARR_API_KEY", "k")
+    path = _write(
+        tmp_path,
+        """
+        [optimizer.sonarr]
+        enabled = false
+        allow_size_increase = false
+
+        [optimizer.radarr]
+        allow_quality_downgrade = false
+        """,
+    )
+    config = load_config(path)
+    assert config.optimizer.sonarr.enabled is False
+    assert config.optimizer.sonarr.allow_size_increase is False
+    assert config.optimizer.radarr.allow_quality_downgrade is False
+    # untouched flags keep their defaults
+    assert config.optimizer.radarr.enabled is True
+    assert config.optimizer.radarr.allow_size_increase is True
 
 
 def test_optimizer_app_age_gate_overrides(monkeypatch, tmp_path):
