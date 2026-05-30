@@ -1,10 +1,10 @@
-"""Weight lab: visualize how the TOPSIS presets pick releases.
+"""Weight lab: visualize how the presets score and pick releases under the new model.
 
-Drives the real engine and the shipped presets (defaults.toml). For each scenario it shows
-each candidate's closeness under every preset (★ = winner; "drop" = excluded by that preset's
-gb/h floor or the score gap-cut) and the ACT/HOLD decision vs the current file. Part 2 stresses
-retention on a large and a small release pool, and checks that a much-smaller, lower-score
-release still survives and ranks well.
+Drives the real engine: the shared size reference + per-preset weights/size_aim/pick, the
+transition gate, and the per-profile pick. For each scenario it shows every candidate's closeness
+under every preset (★ = the preset's gated pick; "drop" = excluded by the shared gb/h floor or
+the score gap-cut) and the ACT/HOLD decision vs the current file (via the real decide()). Part 2
+stresses retention on a large and a small release pool for a size-leaning preset.
 
 Run:  uv run python tools/weight_lab.py
 Writes a timestamped Markdown report under ./reports/ and prints a short summary.
@@ -17,7 +17,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from optimizarr.features.optimizer.config import Preset, default_topsis
+from optimizarr.features.optimizer.config import ResolvedProfile, default_topsis
+from optimizarr.features.optimizer.decision import decide
 from optimizarr.features.optimizer.topsis import GB, Topsis, eligible
 
 
@@ -28,6 +29,17 @@ def _release(title: str, score: int, res: int, size_gb: float) -> dict:
         "quality": {"quality": {"resolution": res}},
         "size": int(size_gb * GB),
         "rejections": [],
+    }
+
+
+def _as_file(release: dict) -> dict:
+    """Convert a release-shaped dict into the current-library-file shape decide() expects."""
+    res = release["quality"]["quality"]["resolution"]
+    return {
+        "id": 1,
+        "customFormatScore": release["customFormatScore"],
+        "size": release["size"],
+        "mediaInfo": {"resolution": f"x{res}"},
     }
 
 
@@ -48,24 +60,24 @@ SCENARIOS: list[Scenario] = [
         runtime_h=2.0,
         current=_release("(current) mediocre 2160p", 700_000, 2160, 30.0),
         candidates=[
-            _release("2160p Remux", 1_000_000, 2160, 60.0),  # 30 GB/h
-            _release("2160p WEB-DL", 950_000, 2160, 24.0),  # 12 GB/h
-            _release("2160p x265", 930_000, 2160, 8.0),  # 4 GB/h, lean
+            _release("2160p Remux", 1_000_000, 2160, 60.0),  # 30 GiB/h
+            _release("2160p WEB-DL", 950_000, 2160, 24.0),  # 12 GiB/h
+            _release("2160p x265", 930_000, 2160, 8.0),  # 4 GiB/h, lean
         ],
-        note="Remux/Quality tolerate the big remux (high bloat); Efficient/Compact swing to the "
-        "lean encodes. The remux is 'bloated' only under the size-conscious presets.",
+        note="Remux takes the top-scoring remux (max_score); size-leaning presets swing to the "
+        "lean encodes. No profile is pushed bigger than a real score gain warrants.",
     ),
     Scenario(
-        name="Floor varies by preset: is the tiny encode even considered?",
+        name="Much-smaller current file must not be inflated",
         target_res=2160,
         runtime_h=2.0,
-        current=_release("(current) 1080p", 800_000, 1080, 18.0),
+        current=_release("(current) superb tiny x265", 950_000, 2160, 7.0),  # 3.5 GiB/h
         candidates=[
-            _release("2160p WEB-DL", 960_000, 2160, 22.0),  # 11 GB/h
-            _release("2160p micro x265", 900_000, 2160, 6.0),  # 3 GB/h
+            _release("2160p WEB-DL bigger", 950_000, 2160, 22.0),  # 11 GiB/h, same score
+            _release("2160p remux huge", 980_000, 2160, 60.0),  # 30 GiB/h, slightly higher
         ],
-        note="The 3 GB/h encode is below Remux/Quality's 2160 floor (so dropped there) but above "
-        "Balanced/Efficient/Compact's floor (kept) — the gb/h floor is per-preset.",
+        note="The current file is already tiny and good. Same-score-but-bigger is forbidden for "
+        "all; only Remux/Quality may take the higher-scoring big remux.",
     ),
 ]
 
@@ -74,37 +86,43 @@ RETENTION_TARGET = 2160
 RETENTION_PRESET = "Compact"  # size-leaning: where small gems matter most
 
 
-def _included(t: Topsis, preset: Preset, releases: list[dict], runtime_h: float) -> set[int]:
-    """ids of releases that survive a preset's gb/h floor + the score gap-cut."""
-    after_gbh = t.filter_by_gbh_floor(eligible(releases), runtime_h, preset.size_by_resolution)
+def _resolved(t: Topsis, name: str) -> ResolvedProfile:
+    return t.resolve_profile(name)
+
+
+def _included(t: Topsis, releases: list[dict], runtime_h: float) -> set[int]:
+    """ids of releases that survive the shared gb/h floor + the score gap-cut (preset-agnostic
+    now — the floor is shared)."""
+    after_gbh = t.filter_by_gbh_floor(eligible(releases), runtime_h)
     return {id(r) for r in t.filter_by_score_gap(after_gbh)}
 
 
-def _closeness(t: Topsis, preset: Preset, release: dict, runtime_h: float, target: int) -> float:
-    attrs = t.attributes_for(release, runtime_h, preset.size_by_resolution, target)
-    return t.closeness(attrs, preset.weights)
+def _closeness(
+    t: Topsis, rp: ResolvedProfile, release: dict, runtime_h: float, target: int
+) -> float:
+    return t.closeness(t.attributes_for(release, runtime_h, rp, target), rp.weights)
 
 
 def render_scenario(t: Topsis, sc: Scenario) -> tuple[list[str], list[str]]:
     presets = t.cfg.presets
+    rp = {name: _resolved(t, name) for name in presets}
+    included = _included(t, sc.candidates, sc.runtime_h)
     cur_clo = {
-        name: _closeness(t, p, sc.current, sc.runtime_h, sc.target_res)
-        for name, p in presets.items()
+        name: _closeness(t, rp[name], sc.current, sc.runtime_h, sc.target_res) for name in presets
     }
-    included = {name: _included(t, p, sc.candidates, sc.runtime_h) for name, p in presets.items()}
     cand_clo = {
-        id(r): {
-            name: _closeness(t, p, r, sc.runtime_h, sc.target_res) for name, p in presets.items()
-        }
+        id(r): {name: _closeness(t, rp[name], r, sc.runtime_h, sc.target_res) for name in presets}
         for r in sc.candidates
     }
-    winner = {
-        name: max(
-            (r for r in sc.candidates if id(r) in included[name]),
-            key=lambda r: cand_clo[id(r)][name],
-            default=None,
-        )
+    # The real decision (gate + pick) per preset.
+    cur_file = _as_file(sc.current)
+    decisions = {
+        name: decide(t, sc.candidates, sc.runtime_h, name, sc.target_res, cur_file)
         for name in presets
+    }
+    winner_title = {
+        name: (d.pick.get("title") if d.action == "ACT" and d.pick else None)
+        for name, d in decisions.items()
     }
 
     md = [
@@ -114,44 +132,37 @@ def render_scenario(t: Topsis, sc: Scenario) -> tuple[list[str], list[str]]:
         f"- {sc.note}",
         "",
     ]
-    header = ["release", "score", "res", "GB/h", *presets]
+    header = ["release", "score", "res", "GiB/h", *presets]
     md.append("| " + " | ".join(header) + " |")
     md.append("|" + "|".join(["---"] * len(header)) + "|")
 
-    def row(r: dict, clo: dict[str, float], dropped: set[str] | None) -> str:
+    def row(r: dict, clo: dict[str, float], dropped: bool) -> str:
         gbh = (r["size"] / GB) / sc.runtime_h
         res = r["quality"]["quality"]["resolution"]
         cells = [r["title"], f"{r['customFormatScore']:,}", f"{res}p", f"{gbh:.1f}"]
         for name in presets:
-            if dropped is not None and name in dropped:
+            if dropped:
                 cells.append("drop")
             else:
                 val = f"{clo[name]:.3f}"
-                if winner[name] is not None and r is winner[name]:
+                if winner_title[name] == r["title"]:
                     val = f"**{val} ★**"
                 cells.append(val)
         return "| " + " | ".join(cells) + " |"
 
-    md.append(row(sc.current, cur_clo, None) + "  ← current")
+    md.append(row(sc.current, cur_clo, False) + "  ← current")
     for r in sc.candidates:
-        dropped = {name for name in presets if id(r) not in included[name]}
-        md.append(row(r, cand_clo[id(r)], dropped))
+        md.append(row(r, cand_clo[id(r)], id(r) not in included))
     md.append("")
 
-    md.append("**Decision per preset** (Δ vs current; ACT if ≥ min_closeness_gain):")
+    md.append("**Decision per preset** (real gate + pick vs current):")
     md.append("")
     summary = [f"  {sc.name}"]
     for name in presets:
-        win = winner[name]
-        if win is None:
-            md.append(f"- `{name}`: no viable candidate → **HOLD**")
-            summary.append(f"    {name:<10} → HOLD (none)")
-            continue
-        gain = cand_clo[id(win)][name] - cur_clo[name]
-        act = gain >= t.cfg.min_closeness_gain
-        verb = "ACT" if act else "HOLD"
-        md.append(f"- `{name}`: **{win['title']}** (Δ {gain:+.3f}) → **{verb}**")
-        summary.append(f"    {name:<10} → {verb:<4} {win['title']} (Δ {gain:+.3f})")
+        d = decisions[name]
+        title = d.pick.get("title") if d.pick else "—"
+        md.append(f"- `{name}`: {d.action} — {title}  ({d.reason})")
+        summary.append(f"    {name:<10} → {d.action:<4} {title}")
     md.append("")
     return md, summary
 
@@ -171,7 +182,7 @@ def _make_popular(rng: random.Random) -> list[dict]:
     add("x265", 14, 880_000, 970_000, 6.0, 12.0)  # high score, small — the "gems"
     add("web-mid", 12, 550_000, 840_000, 14.0, 24.0)
     add("low", 4, 60_000, 480_000, 8.0, 30.0)
-    add("FAKE", 4, 900_000, 1_000_000, 1.5, 2.6)  # tiny -> below gb/h floor
+    add("FAKE", 4, 900_000, 1_000_000, 1.0, 2.6)  # tiny -> below the 2160 floor (3.0 GiB/h)
     rng.shuffle(rel)
     return rel
 
@@ -187,10 +198,10 @@ def _make_obscure() -> list[dict]:
 
 
 def render_retention(t: Topsis, name: str, releases: list[dict]) -> list[str]:
-    preset = t.cfg.presets[RETENTION_PRESET]
+    rp = _resolved(t, RETENTION_PRESET)
     rt = RETENTION_RUNTIME_H
     after_hard = eligible(releases)
-    after_gbh = t.filter_by_gbh_floor(after_hard, rt, preset.size_by_resolution)
+    after_gbh = t.filter_by_gbh_floor(after_hard, rt)
     kept = t.filter_by_score_gap(after_gbh)
 
     md = [f"### {name}  (preset {RETENTION_PRESET})", ""]
@@ -201,14 +212,14 @@ def render_retention(t: Topsis, name: str, releases: list[dict]) -> list[str]:
     md.append(f"| after score gap-cut | {len(kept)} |")
     md.append("")
 
-    ranked = sorted(kept, key=lambda r: -_closeness(t, preset, r, rt, RETENTION_TARGET))
+    ranked = sorted(kept, key=lambda r: -_closeness(t, rp, r, rt, RETENTION_TARGET))
     md.append("Top 8 by closeness:")
     md.append("")
-    md.append("| # | release | score | size GB (GB/h) | closeness |")
+    md.append("| # | release | score | size GB (GiB/h) | closeness |")
     md.append("|---|---|---|---|---|")
     for i, r in enumerate(ranked[:8], 1):
         gbh = (r["size"] / GB) / rt
-        clo = _closeness(t, preset, r, rt, RETENTION_TARGET)
+        clo = _closeness(t, rp, r, rt, RETENTION_TARGET)
         md.append(
             f"| {i} | {r['title']} | {r['customFormatScore']:,} | "
             f"{r['size'] / GB:.1f} ({gbh:.1f}) | {clo:.3f} |"
@@ -233,25 +244,34 @@ def main() -> None:
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
 
     md: list[str] = [
-        "# TOPSIS preset lab",
+        "# Preset lab",
         "",
         f"Generated {datetime.now().isoformat(timespec='seconds')}",
         "",
-        "Closeness is the only decision factor. Each preset bundles weights + a per-resolution",
-        "size tent {floor, target, bloat} — n_size peaks at the *target* size for that release",
-        "kind. ★ = winner per preset; 'drop' = excluded by its gb/h floor or gap-cut.",
+        "One shared size reference {floor, target, ceiling} GiB/h; each preset adds weights, a",
+        "relative size_aim (one-sided curve plateau), a pick method, and transition rules. ★ = the",
+        "preset's gated pick; 'drop' = excluded by the shared gb/h floor or the score gap-cut.",
+        "",
+        "## Shared size reference (GiB/h)",
+        "",
+        "| res | floor | target | ceiling |",
+        "|---|---|---|---|",
+    ]
+    for res in sorted(t.cfg.reference, reverse=True):
+        floor, target, ceiling = t.cfg.reference[res]
+        md.append(f"| {res}p | {floor:g} | {target:g} | {ceiling:g} |")
+    md += [
         "",
         "## Presets",
         "",
-        "| preset | score | resolution | size | 2160 size {floor, target, bloat} |",
-        "|---|---|---|---|---|",
+        "| preset | score | res | size | size_aim | pick |",
+        "|---|---|---|---|---|---|",
     ]
     for name, p in t.cfg.presets.items():
         w = p.weights
-        floor, target, bloat = p.size_by_resolution.get(2160, (0.0, 0.0, 0.0))
         md.append(
             f"| {name} | {w['score']:.2f} | {w['resolution']:.2f} | {w['size']:.2f} | "
-            f"{{{floor:g}, {target:g}, {bloat:g}}} |"
+            f"{p.size_aim:g} | {p.pick} |"
         )
     md.append("")
     md.append("# Part 1 — preset comparison on curated scenarios")
@@ -267,20 +287,14 @@ def main() -> None:
     md.append("")
     summaries.append("  --- Part 2: retention ---")
     rng = random.Random(7)
-    for name, releases in {
-        "popular movie (~94 releases)": _make_popular(rng),
-        "obscure movie (5 releases)": _make_obscure(),
-    }.items():
-        md.extend(render_retention(t, name, releases))
-        summaries.append(f"    {name}: {len(releases)} in")
+    md.extend(render_retention(t, "Large popular-title pool", _make_popular(rng)))
+    md.extend(render_retention(t, "Small obscure-title pool", _make_obscure()))
 
-    out_dir = Path("reports")
-    out_dir.mkdir(exist_ok=True)
-    out_path = out_dir / f"weight-lab-{ts}.md"
-    out_path.write_text("\n".join(md) + "\n")
-
+    out = Path("reports") / f"weight-lab-{ts}.md"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("\n".join(md) + "\n")
+    print(f"wrote {out}")
     print("\n".join(summaries))
-    print(f"\nFull report: {out_path}")
 
 
 if __name__ == "__main__":

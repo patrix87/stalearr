@@ -75,61 +75,95 @@ resolution_ideal = 2160          # fallback resolution target when a profile exp
 resolution_anti_ideal = 480
 # gap-cut inclusion: keep the top score cluster down to the first relative drop greater than this.
 score_gap = 0.20
-# Swap only when the pick's closeness beats the current file's by at least this much.
-min_closeness_gain = 0.02
 # Preset used when a profile name matches no preset by keyword.
 default_preset = "Efficient"
 
-# Presets bundle weights (score/resolution/size, sum 1.0) + a per-resolution size tent.
-# size_by_resolution entries are { floor, target, bloat } GB/h:
-#   - floor   : drop threshold (releases below are removed before TOPSIS); curve baseline
-#   - target  : n_size = 1.0 here (the kind of release this preset is designed to pick)
-#   - bloat   : n_size = 0 here (too big to be a fit for this preset)
-# When target == floor the tent degenerates to a pure cost curve (smaller wins) — that's how
-# Compact behaves. For Remux the target sits in remux territory, so big files are favored.
-# Profiles attach to a preset whose name is a (case-insensitive) substring of the profile name;
-# e.g. "2160p Quality" -> Quality, "2160p Remux" -> Remux. Add more presets freely.
+# ----- Shared size reference (one objective set, used by ALL profiles) -----
+# Realistic GiB/h per resolution (GB = 1024^3 -> GiB), HDR-assumed and deliberately lean (this
+# is a space-saving tool). Profiles never aim ABOVE these.
+#   - floor   : below this the encode is fake / too soft -> hard pre-filter drop.
+#   - target  : a realistic good (HDR) release at this resolution.
+#   - ceiling : above this is bloat; n_size reaches 0 here.
+# Each profile's one-sided size curve: n_size = 1.0 at/below (size_aim * target), then ramps
+# down to 0 at ceiling. Smaller than the aim is NEVER penalized -> nothing inflates a file.
+[optimizer.topsis.reference]
+"2160" = { floor = 3.0, target = 6.5, ceiling = 18 }
+"1080" = { floor = 1.0, target = 2.5, ceiling = 8 }
+"720"  = { floor = 0.4, target = 1.0, ceiling = 4 }
+"480"  = { floor = 0.2, target = 0.5, ceiling = 3 }
+
+# ----- Presets -----
+# Each preset = TOPSIS weights (score/resolution/size, sum 1.0) + a relative `size_aim`
+# (fraction of the reference target where its size curve plateaus) + a `pick` method
+# (topsis | max_score | min_size) + a [.transitions] rule set (which moves from the current
+# file are legal). Profiles attach to a preset whose name is a (case-insensitive) substring of
+# the profile name; e.g. "2160p Quality" -> Quality, "2160p Remux" -> Remux. Add presets freely.
+#
+# transitions keys (defaults in parens):
+#   score_slack (0.02) / score_much (0.10)  : |Δn_score| "same" band / "much" boundary.
+#   size_slack (0.03)  / size_much (0.30)   : relative size "same" band / "much" boundary.
+#   allow_bigger_for_score (true)           : may a bigger file be taken for a higher score?
+#   bigger_needs_much_score (true)          : ...only if the gain clears score_much?
+#   accept_score_drop (true)                : may a slightly-lower-score release be taken?
+#   slight_drop_needs_much_smaller (false)  : ...only when it is *much* smaller?
+#   accept_much_lower_score (false)         : may a much-lower-score release be taken (Compact)?
+#   viability_score (0)                     : floor below which score drops are never taken.
 
 [optimizer.topsis.presets.Remux]
-score = 0.70
+# Untouched UHD/BluRay remux: score is everything, size barely weighs, never trade score away.
+score = 0.80
 resolution = 0.15
-size = 0.15
-# Untouched UHD/BluRay remux. Target at the LOW end of the remux size band so leaner remuxes
-# win over bigger ones, while bloat stays wide enough that large remuxes aren't dropped.
-size_by_resolution = { "480" = { floor = 0.4, target = 1.5, bloat = 10 }, "720" = { floor = 1.5, target = 4.0, bloat = 18 }, "1080" = { floor = 6.0, target = 10.0, bloat = 40 }, "2160" = { floor = 12.0, target = 20.0, bloat = 100 } }
+size = 0.05
+size_aim = 1.0
+pick = "max_score"
+[optimizer.topsis.presets.Remux.transitions]
+accept_score_drop = false        # never accept a lower-score release
+bigger_needs_much_score = false  # any higher score justifies a bigger remux
 
 [optimizer.topsis.presets.Quality]
+# Max score, cares a little about size: takes a slightly-lower score only for a much smaller file.
 score = 0.65
 resolution = 0.15
 size = 0.20
-# Full BluRay encode (not remux): target at the low end so a leaner Quality encode wins.
-size_by_resolution = { "480" = { floor = 0.2, target = 0.8, bloat = 6 }, "720" = { floor = 0.5, target = 2.0, bloat = 10 }, "1080" = { floor = 2.0, target = 4.0, bloat = 22 }, "2160" = { floor = 4.0, target = 10.0, bloat = 50 } }
+size_aim = 1.0
+pick = "topsis"
+[optimizer.topsis.presets.Quality.transitions]
+slight_drop_needs_much_smaller = true
 
 [optimizer.topsis.presets.Balanced]
-score = 0.45
+# Good score AND smaller, leaning score.
+score = 0.50
 resolution = 0.10
-size = 0.45
-# Just above Efficient: target at the low end of a comfortable codec encode.
-size_by_resolution = { "480" = { floor = 0.2, target = 0.5, bloat = 4 }, "720" = { floor = 0.4, target = 1.2, bloat = 7 }, "1080" = { floor = 1.0, target = 2.5, bloat = 14 }, "2160" = { floor = 2.0, target = 5.0, bloat = 25 } }
+size = 0.40
+size_aim = 0.8
+pick = "topsis"
+[optimizer.topsis.presets.Balanced.transitions]
 
 [optimizer.topsis.presets.Efficient]
-score = 0.55
+# Good score AND smaller, leaning size.
+score = 0.40
 resolution = 0.10
-size = 0.35
-# A good codec encode (well-tuned x265/HEVC): target at the low end so a slimmer good encode wins.
-size_by_resolution = { "480" = { floor = 0.2, target = 0.35, bloat = 3 }, "720" = { floor = 0.3, target = 0.8, bloat = 5 }, "1080" = { floor = 0.8, target = 2.0, bloat = 10 }, "2160" = { floor = 1.5, target = 4.0, bloat = 16 } }
+size = 0.50
+size_aim = 0.65
+pick = "topsis"
+[optimizer.topsis.presets.Efficient.transitions]
 
 [optimizer.topsis.presets.Compact]
+# Smallest viable: aims toward the floor, never a bigger file, accepts real score drops if the
+# file is much smaller and still above viability_score.
 score = 0.20
-resolution = 0.15
-size = 0.65
-# As small as it gets above the fake floor. target == floor -> pure cost (smallest wins).
-size_by_resolution = { "480" = { floor = 0.2, target = 0.2, bloat = 2 }, "720" = { floor = 0.3, target = 0.3, bloat = 4 }, "1080" = { floor = 0.8, target = 0.8, bloat = 6 }, "2160" = { floor = 1.5, target = 1.5, bloat = 10 } }
+resolution = 0.10
+size = 0.70
+size_aim = 0.5
+pick = "min_size"
+[optimizer.topsis.presets.Compact.transitions]
+allow_bigger_for_score = false
+accept_much_lower_score = true
+viability_score = 0
 
-# Per-profile-name overrides. Either reference a preset, or give explicit weights, and
-# optionally override the size curve. Example:
+# Per-profile-name overrides. Reference a preset, or override weights / size_aim / pick:
 # [optimizer.topsis.profiles."2160p Remux"]
 # preset = "Remux"
 # [optimizer.topsis.profiles."My Custom 1080p"]
 # weights = { score = 0.5, resolution = 0.1, size = 0.4 }
-# size_by_resolution = { "1080" = { floor = 1.0, target = 4.0, bloat = 20 } }
+# size_aim = 0.7

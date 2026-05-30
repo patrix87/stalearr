@@ -1,23 +1,27 @@
-"""TOPSIS-based release picker.
+"""TOPSIS-based release scorer + per-profile pickers.
 
-Multi-objective release selection. Three axes, each normalized to [0,1]:
+Multi-objective release scoring. Three axes, each normalized to [0,1]:
   - score:      Profilarr customFormatScore, fixed scale [anti_ideal, ideal] (higher better)
   - resolution: pixel height toward the profile target (higher better, low weight — Profilarr
                 already folds resolution into score, so this axis mostly avoids double-counting)
-  - size:       GB/h on a cost curve — smaller is better, 1.0 at the per-preset floor, 0 at bloat
+  - size:       GiB/h on a ONE-SIDED curve — n_size = 1.0 at/below the profile's aim
+                (`size_aim * reference.target`), ramping to 0 at the reference ceiling. Smaller
+                than the aim is never penalized, so nothing is ever inflated to "reach" a target.
 
-Inclusion (before scoring): drop hard rejections, drop below the per-preset gb/h floor (fakes),
-then gap-cut the score tail (keep the top cluster down to the first relative drop > score_gap).
+Inclusion (before scoring): drop hard rejections, drop below the shared reference gb/h floor
+(fakes), then gap-cut the score tail (keep the top cluster down to the first relative drop >
+score_gap).
 
-A profile's weights and size curve come from a named preset (Remux/Quality/Balanced/Efficient/
-Compact, or a per-profile override), resolved from the profile name. All tuning is config-driven.
+The size reference `{floor, target, ceiling}` is shared by all profiles (config-driven); a
+profile only contributes its weights, a relative `size_aim`, a `pick` method, and its transition
+rules. The legality gate lives in transitions.py; this module scores and picks among survivors.
 """
 
 from __future__ import annotations
 
 import math
 
-from optimizarr.features.optimizer.config import TopsisConfig
+from optimizarr.features.optimizer.config import ResolvedProfile, TopsisConfig
 
 GB = 1024**3
 
@@ -54,7 +58,7 @@ def eligible(releases: list[dict]) -> list[dict]:
 
 
 class Topsis:
-    """Config-driven TOPSIS picker. One instance per optimizer run."""
+    """Config-driven scorer + picker. One instance per optimizer run."""
 
     def __init__(self, cfg: TopsisConfig):
         self.cfg = cfg
@@ -70,11 +74,9 @@ class Topsis:
                 return name
         return self.cfg.default_preset
 
-    def resolve_profile(
-        self, profile_name: str | None
-    ) -> tuple[dict[str, float], dict[int, tuple[float, float, float]]]:
-        """Return (weights, size_by_resolution) for a profile, honoring exact-name overrides
-        then name-keyword preset matching then default_preset."""
+    def resolve_profile(self, profile_name: str | None) -> ResolvedProfile:
+        """Resolve a profile name to weights + size_aim + pick + transitions, honoring an
+        exact-name override, then name-keyword preset matching, then default_preset."""
         cfg = self.cfg
         override = cfg.profiles.get(profile_name) if profile_name else None
         if override and override.preset:
@@ -84,37 +86,31 @@ class Topsis:
         else:
             base = cfg.presets[cfg.default_preset]
         weights = override.weights if (override and override.weights) else base.weights
-        size = (
-            override.size_by_resolution
-            if (override and override.size_by_resolution)
-            else base.size_by_resolution
+        size_aim = (
+            override.size_aim if (override and override.size_aim is not None) else base.size_aim
         )
-        return weights, size
+        pick = override.pick if (override and override.pick) else base.pick
+        return ResolvedProfile(
+            weights=weights, size_aim=size_aim, pick=pick, transitions=base.transitions
+        )
 
-    def _size_for(
-        self, size_curve: dict[int, tuple[float, float, float]], res: int
-    ) -> tuple[float, float, float]:
-        if res in size_curve:
-            return size_curve[res]
-        keys = sorted(size_curve)
-        if not keys:
-            return (0.0, 0.0, float("inf"))
+    def reference_for(self, res: int) -> tuple[float, float, float]:
+        """Shared (floor, target, ceiling) for a resolution; nearest-defined-at-or-below."""
+        ref = self.cfg.reference
+        if res in ref:
+            return ref[res]
+        keys = sorted(ref)
         below = [k for k in keys if k <= res]
-        return size_curve[below[-1]] if below else size_curve[keys[0]]
+        return ref[below[-1]] if below else ref[keys[0]]
 
     # ----- pre-filters -----
 
-    def filter_by_gbh_floor(
-        self,
-        releases: list[dict],
-        runtime_h: float,
-        size_curve: dict[int, tuple[float, float, float]],
-    ) -> list[dict]:
-        """Drop releases whose GB/h is below the per-preset/per-resolution floor — catches
-        fakes/upscales and "wrong kind of release for this preset" sizes."""
+    def filter_by_gbh_floor(self, releases: list[dict], runtime_h: float) -> list[dict]:
+        """Drop releases whose GiB/h is below the shared per-resolution floor — catches
+        fakes/upscales and other too-soft-for-the-resolution encodes."""
         keep = []
         for r in releases:
-            floor, _target, _bloat = self._size_for(size_curve, _release_resolution(r))
+            floor, _target, _ceiling = self.reference_for(_release_resolution(r))
             if _release_gbh(r, runtime_h) >= floor:
                 keep.append(r)
         return keep
@@ -135,17 +131,12 @@ class Topsis:
             kept.append(cur)
         return kept
 
-    def apply_prefilters(
-        self,
-        releases: list[dict],
-        runtime_h: float,
-        size_curve: dict[int, tuple[float, float, float]],
-    ) -> tuple[list[dict], dict]:
+    def apply_prefilters(self, releases: list[dict], runtime_h: float) -> tuple[list[dict], dict]:
         """Run all pre-filters in order; return (kept, diag) with per-stage counts."""
         diag: dict[str, object] = {"input": len(releases)}
         after_hard = eligible(releases)
         diag["after_hard_rejections"] = len(after_hard)
-        after_gbh = self.filter_by_gbh_floor(after_hard, runtime_h, size_curve)
+        after_gbh = self.filter_by_gbh_floor(after_hard, runtime_h)
         diag["after_gbh_floor"] = len(after_gbh)
         kept = self.filter_by_score_gap(after_gbh)
         diag["after_score_gap"] = len(kept)
@@ -171,43 +162,58 @@ class Topsis:
             return 0.0
         return (r - cfg.resolution_anti_ideal) / (ideal - cfg.resolution_anti_ideal)
 
-    def normalize_size(self, gbh: float, floor: float, target: float, bloat: float) -> float:
-        """Tent: linear floor -> target (rising to 1.0), linear target -> bloat (falling to 0).
-        When target == floor the tent degenerates to a pure cost curve (smaller wins): n_size
-        is 1.0 at the floor and falls linearly to 0 at bloat."""
-        if gbh < floor or gbh >= bloat or bloat <= floor:
+    def normalize_size(self, gbh: float, aim: float, ceiling: float) -> float:
+        """One-sided cost curve: 1.0 at or below `aim`, linear down to 0 at `ceiling`. Smaller
+        than the aim is never penalized — that is what keeps the optimizer from ever inflating a
+        file to reach a target."""
+        if gbh <= aim:
+            return 1.0
+        if gbh >= ceiling or ceiling <= aim:
             return 0.0
-        if target <= floor:
-            return (bloat - gbh) / (bloat - floor)  # cost-only
-        if gbh <= target:
-            return (gbh - floor) / (target - floor)
-        return (bloat - gbh) / (bloat - target)
+        return (ceiling - gbh) / (ceiling - aim)
+
+    def _attrs(
+        self,
+        score: float,
+        res: int,
+        gbh: float,
+        size_gb: float,
+        resolved: ResolvedProfile,
+        target_resolution: int | None,
+    ) -> dict:
+        floor, target, ceiling = self.reference_for(res)
+        aim = resolved.size_aim * target
+        return {
+            "n_score": self.normalize_score(score or 0),
+            "n_resolution": self.normalize_resolution(res, target_resolution),
+            "n_size": self.normalize_size(gbh, aim, ceiling),
+            "raw": {
+                "score": score,
+                "resolution": res,
+                "gbh": gbh,
+                "size_gb": size_gb,
+                "reference": (floor, target, ceiling),
+                "aim": aim,
+            },
+        }
 
     def attributes_for(
         self,
         release: dict,
         runtime_h: float,
-        size_curve: dict[int, tuple[float, float, float]],
+        resolved: ResolvedProfile,
         target_resolution: int | None = None,
     ) -> dict:
         """Normalized [0,1] attributes + raw values for one release."""
         size_bytes = release.get("size", 0)
-        gbh = _release_gbh(release, runtime_h)
-        res = _release_resolution(release)
-        score = release.get("customFormatScore", 0)
-        floor, target, bloat = self._size_for(size_curve, res)
-        return {
-            "n_score": self.normalize_score(score),
-            "n_resolution": self.normalize_resolution(res, target_resolution),
-            "n_size": self.normalize_size(gbh, floor, target, bloat),
-            "raw": {
-                "score": score,
-                "resolution": res,
-                "gbh": gbh,
-                "size_gb": size_bytes / GB,
-                "envelope": (floor, target, bloat),
-            },
-        }
+        return self._attrs(
+            release.get("customFormatScore", 0),
+            _release_resolution(release),
+            _release_gbh(release, runtime_h),
+            size_bytes / GB,
+            resolved,
+            target_resolution,
+        )
 
     def closeness(self, attrs: dict, weights: dict[str, float]) -> float:
         """TOPSIS closeness in [0,1]. 1 = ideal, 0 = anti-ideal."""
@@ -221,78 +227,85 @@ class Topsis:
         total = d_ideal + d_anti
         return 0.0 if total == 0 else d_anti / total
 
+    def _current_resolution(self, movie_file: dict) -> int:
+        mi = movie_file.get("mediaInfo") or {}
+        res_str = mi.get("resolution") or ""
+        if "x" in res_str:
+            try:
+                return int(res_str.split("x")[1])
+            except (IndexError, ValueError):
+                return 0
+        return 0
+
+    def current_attributes(
+        self,
+        movie_file: dict,
+        runtime_h: float,
+        resolved: ResolvedProfile,
+        target_resolution: int | None = None,
+    ) -> dict | None:
+        """Normalized attributes for the existing library file (None if its score is unknown)."""
+        score = movie_file.get("customFormatScore")
+        if score is None:
+            return None
+        size = movie_file.get("size", 0) or 0
+        size_gb = size / GB
+        gbh = (size_gb / runtime_h) if (runtime_h and runtime_h > 0) else 0.0
+        res = self._current_resolution(movie_file)
+        return self._attrs(score, res, gbh, size_gb, resolved, target_resolution)
+
     def closeness_for_current_file(
         self,
         movie_file: dict,
         runtime_h: float,
-        profile_name: str | None = None,
+        resolved: ResolvedProfile,
         target_resolution: int | None = None,
     ) -> tuple[float | None, dict]:
         """Closeness for the existing library file (None if its score is unknown)."""
-        weights, size_curve = self.resolve_profile(profile_name)
-        size = movie_file.get("size", 0) or 0
-        size_gb = size / GB
-        gbh = (size_gb / runtime_h) if (runtime_h and runtime_h > 0) else 0.0
-        score = movie_file.get("customFormatScore")
-        mi = movie_file.get("mediaInfo") or {}
-        res = 0
-        res_str = mi.get("resolution") or ""
-        if "x" in res_str:
-            try:
-                res = int(res_str.split("x")[1])
-            except (IndexError, ValueError):
-                res = 0
-        raw = {"score": score, "resolution": res, "gbh": gbh, "size_gb": size_gb}
-        if score is None:
-            return None, raw
-        floor, target, bloat = self._size_for(size_curve, res)
-        attrs = {
-            "n_score": self.normalize_score(score),
-            "n_resolution": self.normalize_resolution(res, target_resolution),
-            "n_size": self.normalize_size(gbh, floor, target, bloat),
-        }
-        return self.closeness(attrs, weights), raw
+        attrs = self.current_attributes(movie_file, runtime_h, resolved, target_resolution)
+        if attrs is None:
+            size = movie_file.get("size", 0) or 0
+            size_gb = size / GB
+            gbh = (size_gb / runtime_h) if (runtime_h and runtime_h > 0) else 0.0
+            return None, {
+                "score": None,
+                "resolution": self._current_resolution(movie_file),
+                "gbh": gbh,
+                "size_gb": size_gb,
+            }
+        return self.closeness(attrs, resolved.weights), attrs["raw"]
 
-    # ----- ranking -----
+    # ----- scoring & picking -----
 
-    def rank(
+    def score_candidates(
         self,
         releases: list[dict],
         runtime_h: float,
-        profile_name: str | None = None,
+        resolved: ResolvedProfile,
         target_resolution: int | None = None,
     ) -> tuple[list[tuple[dict, dict, float]], dict]:
-        """Return (ranked: [(release, attrs, closeness)], prefilter_diag)."""
-        weights, size_curve = self.resolve_profile(profile_name)
-        kept, diag = self.apply_prefilters(releases, runtime_h, size_curve)
+        """Pre-filter, then return (scored: [(release, attrs, closeness)], diag), sorted best
+        first by closeness (with deterministic tie-breaks)."""
+        kept, diag = self.apply_prefilters(releases, runtime_h)
         scored = [
-            (r, a, self.closeness(a, weights))
+            (r, a, self.closeness(a, resolved.weights))
             for r, a in (
-                (r, self.attributes_for(r, runtime_h, size_curve, target_resolution)) for r in kept
+                (r, self.attributes_for(r, runtime_h, resolved, target_resolution)) for r in kept
             )
         ]
-        scored.sort(key=lambda x: -x[2])
+        scored.sort(key=lambda x: (-x[2], -(x[1]["raw"]["score"] or 0), x[1]["raw"]["gbh"]))
         return scored, diag
 
-    def pick(
-        self,
-        releases: list[dict],
-        runtime_h: float,
-        profile_name: str | None = None,
-        target_resolution: int | None = None,
-    ) -> tuple[tuple[dict, dict, float] | None, dict]:
-        """Return ((release, attrs, closeness), diag), or (None, diag)."""
-        ranked, diag = self.rank(releases, runtime_h, profile_name, target_resolution)
-        return (ranked[0] if ranked else None), diag
-
-    # ----- swap decision -----
-
-    def closeness_gain(self, pick_closeness: float, current_closeness: float | None) -> float:
-        """How much closeness the pick adds over the current file. An unknown current
-        closeness (no score on the current file) is treated as the worst case (0.0)."""
-        baseline = current_closeness if current_closeness is not None else 0.0
-        return pick_closeness - baseline
-
-    def should_swap(self, pick_closeness: float, current_closeness: float | None) -> bool:
-        """Swap iff the pick improves overall closeness by at least min_closeness_gain."""
-        return self.closeness_gain(pick_closeness, current_closeness) >= self.cfg.min_closeness_gain
+    def select(
+        self, candidates: list[tuple[dict, dict, float]], resolved: ResolvedProfile
+    ) -> tuple[dict, dict, float] | None:
+        """Choose one candidate by the profile's pick method. `candidates` are assumed already
+        gated (every entry is a legal transition); ties break deterministically."""
+        if not candidates:
+            return None
+        if resolved.pick == "max_score":
+            return max(candidates, key=lambda x: (x[1]["raw"]["score"] or 0, -x[1]["raw"]["gbh"]))
+        if resolved.pick == "min_size":
+            return min(candidates, key=lambda x: (x[1]["raw"]["gbh"], -(x[1]["raw"]["score"] or 0)))
+        # topsis: already sorted best-first by score_candidates
+        return max(candidates, key=lambda x: x[2])

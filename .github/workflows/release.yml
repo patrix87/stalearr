@@ -17,8 +17,8 @@ jobs:
   build-and-push:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
-      packages: write
+      contents: write   # create the GitHub Release
+      packages: write   # push the image to GHCR
     steps:
       - uses: actions/checkout@v6
 
@@ -53,3 +53,13 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Only on a real v* tag (not workflow_dispatch): publish a GitHub Release with
+      # auto-generated notes and a link to the pushed image. The tag is taken from github.ref.
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            Container image: `${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.ref_name }}`

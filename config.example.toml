@@ -83,13 +83,12 @@ allow_quality_downgrade = true
 ignore_completed_in_queue = true
 auto_import_downgrades = true
 
-# ===== TOPSIS =====
+# ===== TOPSIS / selection =====
 # You usually don't need this section at all — the shipped presets are sensible. Set values
-# here only to override. Score normalizes on a fixed [anti_ideal, ideal] scale; resolution
-# toward the profile's max-allowed resolution; size is a per-preset TENT {floor, target, bloat}
-# peaking at *target* (the GB/h that preset is designed to pick). floor also drops
-# fake/low-bitrate releases. When target == floor the tent degenerates to a cost curve
-# (smaller wins) — that's how Compact behaves.
+# here only to override (everything deep-merges onto defaults.toml). Score normalizes on a fixed
+# [anti_ideal, ideal] scale; resolution toward the profile's max-allowed resolution; size uses a
+# ONE-SIDED curve off the shared reference: n_size = 1.0 at/below (size_aim * target), ramping to
+# 0 at the reference ceiling. Smaller than the aim is never penalized, so nothing is inflated.
 [optimizer.topsis]
 score_ideal = 1000000
 score_anti_ideal = 0
@@ -97,31 +96,39 @@ resolution_ideal = 2160       # fallback target when a profile exposes no allowe
 resolution_anti_ideal = 480
 # Inclusion: keep the top score cluster down to the first relative drop greater than this.
 score_gap = 0.20
-# Swap only when the pick's closeness beats the current file's by at least this much.
-min_closeness_gain = 0.02
 # Preset used when a profile name matches no preset by keyword.
 default_preset = "Efficient"
 
-# --- Presets (weights sum to 1.0 + a per-resolution size tent {floor, target, bloat}) ---
+# --- Shared size reference (one objective set, used by every profile) ---
+# Realistic GiB/h per resolution (GB = 1024^3), HDR-assumed and deliberately lean. floor = fake
+# cut; target = a good release; ceiling = bloat (n_size hits 0). Profiles never aim above target.
+# [optimizer.topsis.reference]
+# "2160" = { floor = 3.0, target = 6.5, ceiling = 18 }
+# "1080" = { floor = 1.0, target = 2.5, ceiling = 8 }
+
+# --- Presets ---
 # A Radarr/Sonarr profile attaches to the preset whose name is a case-insensitive substring of
-# the profile name (e.g. "2160p Quality" -> Quality; "2160p Remux" -> Remux). Resolution weight
-# is kept low on purpose — Profilarr already folds resolution into the score. The bloat point is
-# what makes a preset remux- vs efficient-friendly. Override a shipped preset by redefining it:
+# the profile name (e.g. "2160p Quality" -> Quality; "2160p Remux" -> Remux). Each preset =
+# weights (sum 1.0) + size_aim (fraction of the reference target where its size curve plateaus) +
+# pick (topsis | max_score | min_size) + a [.transitions] rule set. Override by redefining:
 #
 # [optimizer.topsis.presets.Quality]
 # score = 0.65
 # resolution = 0.15
 # size = 0.20
-# size_by_resolution = { "1080" = { floor = 1.5, target = 5, bloat = 20 }, "2160" = { floor = 3, target = 10, bloat = 50 } }
+# size_aim = 1.0
+# pick = "topsis"
+# [optimizer.topsis.presets.Quality.transitions]
+# slight_drop_needs_much_smaller = true
 #
 # Shipped presets (see defaults.toml): Remux, Quality, Balanced, Efficient, Compact.
 
 # --- Per-profile-name overrides ---
-# Pin an exact profile to a preset, or give it explicit weights / size curve:
+# Pin an exact profile to a preset, or override its weights / size_aim / pick:
 #
 # [optimizer.topsis.profiles."2160p Remux"]
 # preset = "Remux"
 #
 # [optimizer.topsis.profiles."My Custom 1080p"]
 # weights = { score = 0.5, resolution = 0.1, size = 0.4 }
-# size_by_resolution = { "1080" = { floor = 1.0, target = 4.0, bloat = 20 } }
+# size_aim = 0.7
