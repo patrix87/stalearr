@@ -47,7 +47,7 @@ def test_radarr_only_with_defaults(monkeypatch, tmp_path):
     # per-app enabled is on by default; sonarr's app config is still parsed even with no conn
     assert config.optimizer.radarr.enabled is True
     assert config.optimizer.sonarr.enabled is True
-    assert config.optimizer.enabled is False
+    assert config.optimizer.enabled is True
 
 
 def test_overrides_from_toml(monkeypatch, tmp_path):
@@ -91,7 +91,7 @@ def test_missing_config_file_uses_defaults(monkeypatch):
     monkeypatch.setenv("RADARR_URL", "http://x")
     monkeypatch.setenv("RADARR_API_KEY", "k")
     config = load_config("/nonexistent/config.toml")  # no user file -> built-in defaults
-    assert config.optimizer.enabled is False
+    assert config.optimizer.enabled is True
     assert config.optimizer.topsis is not None
     assert "Balanced" in config.optimizer.topsis.presets
 
